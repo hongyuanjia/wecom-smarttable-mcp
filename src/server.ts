@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { McpServer, isInputRequiredResult, type ServerContext } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';

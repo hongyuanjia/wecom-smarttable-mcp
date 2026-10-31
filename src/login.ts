@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { loginWithBrowser } from './login-browser.js';
 import { failure } from './errors.js';
 

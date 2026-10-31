@@ -16,7 +16,32 @@
 
 环境要求：Node.js 22+、Google Chrome，以及可访问目标智能表格的企业微信账号（目前已在 macOS 完成验证）。登录助手使用独立 profile，不影响日常使用的 Chrome 资料。
 
-首次使用先克隆仓库、安装依赖并构建：
+登录复用系统已安装的 Google Chrome，无需额外执行 `playwright install`。
+
+### npm 安装
+
+直接由 MCP 客户端通过以下命令启动，无需克隆仓库或安装 TypeScript：
+
+```sh
+npx -y wecom-smarttable-mcp@0.4.0
+```
+
+这是 stdio 服务，直接在终端执行后会等待 MCP 请求；正常使用时由客户端启动。首次运行需联网下载 npm 包及运行依赖，后续复用 npm 缓存。也可以全局安装：
+
+```sh
+npm install -g wecom-smarttable-mcp@0.4.0
+wecom-smarttable-mcp
+```
+
+如需手动登录，全局安装后运行 `wecom-smarttable-login '智能表格链接'`；未全局安装时运行：
+
+```sh
+npx -y --package=wecom-smarttable-mcp@0.4.0 wecom-smarttable-login '智能表格链接'
+```
+
+### 从源码运行
+
+需要开发调试时，克隆仓库、安装依赖并构建：
 
 ```sh
 git clone https://github.com/hyofeng/wecom-smarttable-mcp.git
@@ -24,8 +49,6 @@ cd wecom-smarttable-mcp
 npm ci
 npm run build
 ```
-
-项目直接从源码构建运行，暂未发布到 npm（`package.json` 中的 `private: true` 仅用于防止误发布到 npm）。登录复用系统已安装的 Google Chrome，无需额外执行 `playwright install`。
 
 接入后直接向客户端提供链接即可，首次登录同样由 MCP 自动引导。如果需要在终端手动排查，或者客户端不支持表单交互，可执行：
 
@@ -43,7 +66,19 @@ node /absolute/path/to/wecom-smarttable-mcp/dist/server.js
 
 ## Codex 接入
 
-将 [examples/codex-mcp.toml](examples/codex-mcp.toml) 中的配置段加入 `~/.codex/config.toml`，并开启新的 Codex 会话。把示例里的 `/absolute/path/to/` 替换为本机实际绝对路径：`command` 填 `node -p "process.execPath"` 输出的 Node 路径，`args` 和 `cwd` 填仓库路径。后续若升级或迁移 Node，需同步更新配置中的 `command`；修改代码、调整超时或工具定义后，重新执行 `npm run build` 并重连 MCP（或重开会话）即可生效。配置格式参考 [OpenAI MCP 配置文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
+将 [examples/codex-mcp-npm.toml](examples/codex-mcp-npm.toml) 中的配置段加入 `~/.codex/config.toml`，并开启新的 Codex 会话：
+
+```toml
+[mcp_servers.wecom_smarttable]
+command = "npx"
+args = ["-y", "wecom-smarttable-mcp@0.4.0"]
+startup_timeout_sec = 120
+tool_timeout_sec = 1200
+```
+
+首次下载预留 120 秒启动时间。若客户端找不到 `npx`，将 `command` 改为终端中 `command -v npx` 输出的绝对路径，并确保客户端进程的 `PATH` 中包含 Node.js 22+。示例固定使用 `0.4.0`；升级时更新版本号并重连 MCP。
+
+从源码运行时，使用 [examples/codex-mcp.toml](examples/codex-mcp.toml)。把其中的 `/absolute/path/to/` 替换为本机实际绝对路径：`command` 填 `node -p "process.execPath"` 输出的 Node 路径，`args` 和 `cwd` 填仓库路径。后续若升级或迁移 Node，需同步更新配置中的 `command`；修改代码后，重新执行 `npm run build` 并重连 MCP（或重开会话）即可生效。两份示例使用相同的服务名，选择一种配置即可。配置格式参考 [OpenAI MCP 配置文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
 
 提供的工具列表：
 
@@ -186,6 +221,39 @@ git config --local core.hooksPath .githooks
 
 ```sh
 npm audit --registry=https://registry.npmjs.org
+```
+
+## npm 发布（维护者）
+
+在源码仓库根目录安装开发依赖后执行发布检查：
+
+```sh
+npm ci
+npm run check
+npm test
+npm run check:public
+npm run check:public -- --history
+npm audit --registry=https://registry.npmjs.org/
+npm pack --dry-run
+npm publish --dry-run
+```
+
+`prepack` 会自动构建 TypeScript，`npm publish --dry-run` 会演练发布流程但不上传。打包清单应仅包含 `dist/`、`examples/`、`README.md`、`LICENSE`、`SECURITY.md`、`VALIDATION.md` 和 `package.json`，不得包含登录态、Chrome profile、下载文件、私有配置或报告。安装 npm 包时只需运行依赖，不会在使用者机器上编译 TypeScript。
+
+准备好 npm 账号并开启双重认证后，按 [npm 官方发布指南](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/) 完成浏览器登录，再正式发布：
+
+```sh
+npm login --registry=https://registry.npmjs.org/
+npm whoami --registry=https://registry.npmjs.org/
+npm publish
+```
+
+终端无法自动打开浏览器时，使用 `npm publish --browser=false`，按终端给出的 npm 链接手动完成 2FA；发布进程会等待认证结果。
+
+`publishConfig` 已指定 npm 官方源和公开访问。`prepublishOnly` 会在正式发布前重新运行类型检查、单元测试和当前公开文件检查，失败则中止发布。当前首次发布版本为 `0.4.0`；后续发布须使用新的版本号，并同步 `src/server.ts` 中的 MCP 服务版本和安装示例。正式发布后，核对公开版本：
+
+```sh
+npm view wecom-smarttable-mcp@0.4.0 version --registry=https://registry.npmjs.org/
 ```
 
 详细的协议分析与验证记录见 [VALIDATION.md](VALIDATION.md)。

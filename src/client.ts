@@ -22,7 +22,7 @@ export class WecomClient {
       requireData(Array.isArray(state.cookies), '登录态文件结构错误。');
     } catch (error) {
       if (error instanceof WecomError) throw error;
-      throw new WecomError('LOGIN_REQUIRED', '尚无可读取的本地登录态。请运行 npm run login -- "智能表格链接"。');
+      throw new WecomError('LOGIN_REQUIRED', '尚无可读取的本地登录态。请运行本机登录助手完成登录。');
     }
     const context = await request.newContext({ storageState: state, timeout: 30000, ignoreHTTPSErrors: false });
     return new WecomClient(context, state.cookies);

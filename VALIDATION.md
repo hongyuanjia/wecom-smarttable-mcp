@@ -82,3 +82,19 @@ URL 校验采用精确域名匹配：第一方鉴权下载仅允许已验证的�
 - **并发与版本控制**：服务端会合并旧 `base_rev` 命令，因此工具在同进程内按文档排队、提交前复核 `expected_revision`、提交后核对版本号与回读数据。实测同连接并发提交两个相同版本的修改时，第二个请求在发出写入前返回 `STALE_REVISION`。
 - **整表移入回收站**：先通过权限接口按 `document_id` 获取唯一文件映射，核对智能表格类型（`70`）与删除权限（`23`，不使用永久删除权限 `25`），再调用 `/webdisk/file_mgr` 提交移入回收站异步任务，最后在回收站中核实 `<file_id>.recycle`、类型 `70` 与删除状态 `2`。
 - **回归结果**：`verify-write.mjs`（10 项线上写入检查）、`verify-delete-table.mjs`（移入回收站与 `check_only` 复核）、`npm run check`、`npm test`（30/30）、`npm run check:public` 与 `npm audit` 全部通过。
+
+## npm 包安装验证（2026-10-23）
+
+在 macOS、Node.js 22.23.2、npm 10.9.8 下，对 `0.4.0` 的实际 npm 压缩包进行隔离安装验证：
+
+- `npm pack` 自动编译，包内共 21 个文件，仅包含编译模块、使用文档、许可证与两份客户端配置示例；包内文件内容通过公开资料检查。
+- 在仓库外临时目录执行 `npm install <压缩包> --omit=dev`，仅安装运行依赖，未安装 TypeScript，安装过程无需构建源码。
+- 使用安装后的 `wecom-smarttable-mcp` 命令和 `npx --offline -y wecom-smarttable-mcp@0.4.0` 分别完成真实 MCP 握手，均正常列出 10 个工具。
+- 空登录目录下的请求返回 `LOGIN_REQUIRED`，登录助手路径指向安装包内的 `dist/login.js`，不依赖源码仓库路径。
+- 安装后的 `wecom-smarttable-login` 拒绝无效 URL，退出码为 1，无标准输出，未创建登录资料或打开浏览器。
+- `npm run check`、`npm test`（30/30）、当前公开文件与完整 Git 历史检查、npm 官方源依赖审计通过，审计结果为 0 个已知漏洞。
+- `npm publish --dry-run` 完整执行 `prepublishOnly` 与 `prepack` 后通过。
+- 正式发布 `wecom-smarttable-mcp@0.4.0` 到 npm 官方源，核对 `latest` 为 `0.4.0`；公开压缩包的 SHA-1 为 `4ad390eaa264551a489a94907147361df494b800`，与已验证的本地压缩包一致。
+- 使用空目录、全新 npm 缓存和空 npm 用户配置，从官方源匿名执行 `npm view` 与 `npx -y wecom-smarttable-mcp@0.4.0`，真实 MCP 握手、10 个工具及缺失登录态错误均通过；`npx -y --package=wecom-smarttable-mcp@0.4.0 wecom-smarttable-login` 的无效 URL 校验也通过。
+
+本轮验证覆盖包分发与进程启动，未重新执行企业微信线上写入、删除或扫码登录；相关已有验证与限制见前文。

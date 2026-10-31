@@ -1,8 +1,27 @@
 {
   "name": "wecom-smarttable-mcp",
   "version": "0.4.0",
-  "private": true,
   "type": "module",
+  "bin": {
+    "wecom-smarttable-mcp": "dist/server.js",
+    "wecom-smarttable-login": "dist/login.js"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "SECURITY.md",
+    "VALIDATION.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "wecom",
+    "smarttable"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -12,6 +31,8 @@
     "start": "node dist/server.js",
     "login": "node dist/login.js",
     "test": "npm run build && node --test tests/*.test.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run check && npm test && npm run check:public",
     "verify:live": "node scripts/verify-live.mjs",
     "check:public": "node scripts/check-public-files.mjs"
   },
@@ -35,6 +56,6 @@
   "description": "Read and edit WeCom smart tables, including recycle-bin deletion, using a local browser session.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hyofeng/wecom-smarttable-mcp.git"
+    "url": "git+https://github.com/hyofeng/wecom-smarttable-mcp.git"
   }
 }

@@ -35,6 +35,7 @@
 2. 检查 Git 提交的作者及提交者邮箱，公开项目优先使用 GitHub 提供的 noreply 邮箱；不要把个人绝对路径、真实业务链接或文件标识写入提交信息。
 3. 测试夹具必须对解压后的内容和嵌套 JSON 做脱敏。压缩及 Base64 编码并不提供保密性，不能只搜索外层文本。
 4. 运行 `npm run check`、`npm test`、`npm run check:public -- --history` 和 `npm audit --registry=https://registry.npmjs.org`。公开文件检查覆盖可达历史、提交邮箱、常见秘密、个人路径及解压后的夹具；仅输出类别及相对位置。审计通过仅表示当时未报告已知依赖漏洞，不能代替代码审查。
+5. npm 发布前运行 `npm pack --dry-run`，检查实际打包清单。`files` 仅允许编译产物、公开文档和示例；npm 包不得包含登录态、profile、下载文件或私有报告。`check:public` 扫描 Git 文件，不替代 npm 打包清单检查。
 
 新增 `.gitignore` 或删除当前文件不会清除已经公开的 Git 历史。已经泄露的凭据应先撤销；如需重写历史，须另行评估协作影响，并考虑已有克隆或缓存仍可能保留旧内容。
 
