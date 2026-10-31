@@ -11,11 +11,20 @@ export const fieldTypes: Record<number, string> = {
 };
 export interface Field { id: string; name: string; type_code: number; type: string; is_primary: boolean; options?: { id: string; name: string }[] }
 export interface Schema { fields: Field[]; views: Raw[]; raw: Raw }
+export function selectFields(schema: Schema, ids: string[]) {
+  const fields = new Map(schema.fields.map(field => [field.id, field]));
+  return ids.map(id => {
+    const field = fields.get(id);
+    if (!field) throw new WecomError('UNKNOWN_FIELD', '字段选择包含不存在或不可读取的字段 ID。');
+    return field;
+  });
+}
 export interface Chunk {
   sheetId: string; revision: number; total: number; start: number; end: number;
   records: { id: string; raw: Raw }[]; schema?: Schema; workbook: Raw[]; raw: Raw;
 }
-export interface Locator { document_id: string; sheet_id: string; record_id: string; chunk_start: number; chunk_size: number; field_id: string; asset_id: string }
+interface AssetIdentity { document_id: string; sheet_id: string; record_id: string; field_id: string; asset_id: string }
+export type Locator = AssetIdentity & ({ chunk_start: number; chunk_size: number } | { source: 'record_query' });
 export interface Asset {
   kind: 'image' | 'attachment'; id: string; name: string; url: string;
   size: number | null; width?: number; height?: number; extension?: string; source?: string;
@@ -107,23 +116,25 @@ export function assetsFor(cell: Raw | undefined): Asset[] {
   });
 }
 
-export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pick<Chunk, 'start' | 'end'>>, schema: Schema, row: { id: string; raw: Raw }, docId: string, selected: string[], includeAssetLocator = true) {
-  let assetRange: { chunk_start: number; chunk_size: number } | undefined;
-  if (includeAssetLocator) {
-    requireData(chunk.start !== undefined && chunk.end !== undefined, '附件定位器需要真实整表分块范围。');
-    assetRange = { chunk_start: chunk.start, chunk_size: chunk.end - chunk.start + 1 };
-  }
+export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pick<Chunk, 'start' | 'end'>>, schema: Schema, row: { id: string; raw: Raw }, docId: string, selected: string[], includeTextFragments = false) {
+  requireData((chunk.start === undefined) === (chunk.end === undefined), '附件定位器的整表分块范围不完整。');
+  const location = chunk.start !== undefined && chunk.end !== undefined
+    ? { chunk_start: chunk.start, chunk_size: chunk.end - chunk.start + 1 }
+    : { source: 'record_query' as const };
   const cells = cellsFor(row.raw);
-  requireData(Object.keys(cells).every(id => schema.fields.some(f => f.id === id)), '记录中出现字段定义未包含的字段，拒绝静默遗漏。');
+  const fieldsById = new Map(schema.fields.map(field => [field.id, field]));
+  requireData(Object.keys(cells).every(id => fieldsById.has(id)), '记录中出现字段定义未包含的字段，拒绝静默遗漏。');
   const values: Raw = {};
-  for (const field of schema.fields.filter(f => selected.includes(f.id))) {
+  for (const id of selected) {
+    const field = fieldsById.get(id);
+    requireData(field, '选择的字段不在当前表结构中。');
     const cell = cells[field.id];
     if (cell) requireData(cell.k30 === field.type_code, '记录字段类型与字段定义不一致。');
     if ([5, 6].includes(field.type_code)) {
       values[field.id] = { status: cell ? 'present' : 'not_returned', assets: assetsFor(cell).map(asset => {
         const { url: _privateUrl, ...publicAsset } = asset;
-        return { ...publicAsset, ...(assetRange ? { locator: { document_id: docId, sheet_id: chunk.sheetId, record_id: row.id,
-          ...assetRange, field_id: field.id, asset_id: asset.id } satisfies Locator } : {}) };
+        return { ...publicAsset, locator: { document_id: docId, sheet_id: chunk.sheetId, record_id: row.id,
+          ...location, field_id: field.id, asset_id: asset.id } satisfies Locator };
       }) };
     } else if (field.type_code === 10) {
       const created = chunk.raw.k2?.[row.id];
@@ -132,7 +143,7 @@ export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pi
       const fragments = cell?.k1;
       if (fragments !== undefined) requireData(Array.isArray(fragments) && fragments.every(v => typeof v.k2 === 'string'), '文本片段结构变化。');
       const text = (fragments || []).map((v: Raw) => v.k2).join('');
-      values[field.id] = { status: cell ? 'present' : 'not_returned', text, fragments: fragments || [],
+      values[field.id] = { status: cell ? 'present' : 'not_returned', text, ...(includeTextFragments ? { fragments: fragments || [] } : {}),
         text_links: [...new Set<string>(text.match(/https?:\/\/[^\s<>]+/g) || [])].map(url => ({ url, kind: 'text_link', downloadable_as_attachment: false })) };
     } else {
       const value = cell?.[`k${field.type_code}`];

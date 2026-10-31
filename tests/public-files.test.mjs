@@ -19,7 +19,7 @@ test('私有文件与凭据被阻止，诊断不返回匹配值', () => {
 });
 
 test('检查解压后的真实夹具及嵌套 JSON，不把 Base64 当成脱敏', async () => {
-  for (const name of ['write-protocol', 'delete-table', 'query-records']) {
+  for (const name of ['write-protocol', 'delete-table', 'query-records', 'record-query']) {
     const data = await readFile(new URL(`fixtures/${name}.json`, import.meta.url));
     assert.deepEqual(inspectPublicFile(`tests/fixtures/${name}.json`, data), []);
   }

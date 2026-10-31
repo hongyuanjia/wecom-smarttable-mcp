@@ -23,20 +23,20 @@
 直接由 MCP 客户端通过以下命令启动，无需克隆仓库或安装 TypeScript：
 
 ```sh
-npx -y wecom-smarttable-mcp@0.5.0
+npx -y wecom-smarttable-mcp@0.6.0
 ```
 
 这是 stdio 服务，直接在终端执行后会等待 MCP 请求；正常使用时由客户端启动。首次运行需联网下载 npm 包及运行依赖，后续复用 npm 缓存。也可以全局安装：
 
 ```sh
-npm install -g wecom-smarttable-mcp@0.5.0
+npm install -g wecom-smarttable-mcp@0.6.0
 wecom-smarttable-mcp
 ```
 
 如需手动登录，全局安装后运行 `wecom-smarttable-login '智能表格链接'`；未全局安装时运行：
 
 ```sh
-npx -y --package=wecom-smarttable-mcp@0.5.0 wecom-smarttable-login '智能表格链接'
+npx -y --package=wecom-smarttable-mcp@0.6.0 wecom-smarttable-login '智能表格链接'
 ```
 
 ### 从源码运行
@@ -71,12 +71,12 @@ node /absolute/path/to/wecom-smarttable-mcp/dist/server.js
 ```toml
 [mcp_servers.wecom_smarttable]
 command = "npx"
-args = ["-y", "wecom-smarttable-mcp@0.5.0"]
+args = ["-y", "wecom-smarttable-mcp@0.6.0"]
 startup_timeout_sec = 120
 tool_timeout_sec = 1200
 ```
 
-首次下载预留 120 秒启动时间。若客户端找不到 `npx`，将 `command` 改为终端中 `command -v npx` 输出的绝对路径，并确保客户端进程的 `PATH` 中包含 Node.js 22+。示例固定使用 `0.5.0`；升级时更新版本号并重连 MCP。
+首次下载预留 120 秒启动时间。若客户端找不到 `npx`，将 `command` 改为终端中 `command -v npx` 输出的绝对路径，并确保客户端进程的 `PATH` 中包含 Node.js 22+。示例固定使用 `0.6.0`；升级时更新版本号并重连 MCP。
 
 从源码运行时，使用 [examples/codex-mcp.toml](examples/codex-mcp.toml)。把其中的 `/absolute/path/to/` 替换为本机实际绝对路径：`command` 填 `node -p "process.execPath"` 输出的 Node 路径，`args` 和 `cwd` 填仓库路径。后续若升级或迁移 Node，需同步更新配置中的 `command`；修改代码后，重新执行 `npm run build` 并重连 MCP（或重开会话）即可生效。两份示例使用相同的服务名，选择一种配置即可。配置格式参考 [OpenAI MCP 配置文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
 
@@ -84,7 +84,7 @@ tool_timeout_sec = 1200
 
 | 工具 | 用途 |
 | --- | --- |
-| `wecom_table_structure` | 获取所有子表、字段定义（ID/名称/类型/标题列标记）、视图与筛选配置、记录总数及版本号（`revision`） |
+| `wecom_table_structure` | 获取全部或指定子表的字段定义（ID/名称/类型/标题列标记）、视图与筛选配置、记录总数及版本号（`revision`） |
 | `wecom_query_records` | 按字段条件在服务端筛选，分页返回匹配记录；支持文本、单选及 AND/OR 组合 |
 | `wecom_read_records` | 按子表分页读取记录，可指定字段 ID，返回字段值及图片/附件 `locator` |
 | `wecom_download_asset` | 校验 `locator` 所属记录与字段后下载单个原图或附件；小图片可选同时返回 MCP 图像 |
@@ -107,11 +107,15 @@ tool_timeout_sec = 1200
 - “把这两条记录的状态改成已完成，删掉最后两条测试记录。”
 - “把这个链接对应的智能表格移到回收站：`<链接>`”
 
-基本调用顺序：操作已有表格时，先调 `wecom_table_structure` 获取 `sheet_id` 和字段 ID，再调 `wecom_read_records` 分页读取；翻页时原样传回上一页的 `next_cursor`。下载图片或附件时，传入记录中的完整 `locator` 与同一表格链接。`locator` 由来源分页范围与记录/字段/文件 ID 组合而成（并非界面行号），跨会话仍可校验；若原分页范围已不含该记录，重新读取对应记录后再下载即可。
+基本调用顺序：操作已有表格时，先调 `wecom_table_structure` 获取字段 ID，已知子表 ID（链接中的 `tab`）时可传 `sheet_id` 只读取该子表结构，省略则获取全部子表。然后用 `wecom_read_records` 整表分页，或用 `wecom_query_records` 按条件检索；翻页时原样传回上一页的 `next_cursor`。
+
+全量结构最多同时读取 4 张子表，返回顺序仍与子表目录一致。读取记录时，`columns` 和记录中的字段按传入的 `fields` 顺序返回；后续页省略 `fields` 会沿用游标中的顺序。
+
+下载图片或附件时，传入记录中的完整 `locator` 与同一表格链接。整表读取返回的定位器包含真实来源分页范围；查询返回的定位器标记 `source: "record_query"`，下载时直接按记录 ID 回读核实归属，无需再遍历整表。两种定位器都不是界面行号，跨会话可重新校验；若原分页范围已不含该记录，可重新读取或查询记录获取定位器。
 
 ## 按条件检索记录
 
-先调用 `wecom_table_structure` 获取真实子表、字段及选项 ID，再调用 `wecom_query_records`。筛选在企业微信服务端执行，只分页返回匹配记录，不扫描整张子表；每次查询额外读取首条分块以取得结构和核对版本。
+先调用 `wecom_table_structure` 获取真实子表、字段及选项 ID，再调用 `wecom_query_records`。筛选在企业微信服务端执行，只分页返回匹配记录，不扫描整张子表；每次查询前后各读取首条分块以取得结构和核对版本。
 
 ```json
 {
@@ -130,10 +134,10 @@ tool_timeout_sec = 1200
 
 - 支持 `TEXT` 的 `eq`（服务端相等，仅单行查询值）和 `contains`（包含）、`SINGLE_SELECT` 的 `eq`（传已有选项 ID）；最多 20 个条件，通过 `and`/`or` 连接。其他字段和运算符尚未验证，会明确报错。
 - 含换行查询值的文本 `eq` 在真实接口中出现与读取值不一致的结果，当前拒绝此用法；可使用单行关键词 `contains`。
-- 返回 `total_matching_records`、`records`、`has_more`、`next_cursor`。每页默认 50 条，最多 200 条；翻页时继续传入同一条件和同一 `fields`，并原样传回游标。版本变化返回 `STALE_CURSOR`，需从第一页重查。
+- 返回 `total_matching_records`、`records`、`has_more`、`next_cursor`。每页默认 50 条，最多 200 条；翻页时继续传入同一条件并原样传回游标，`fields` 可省略以沿用上一页，显式传入时必须保持一致。版本变化返回 `STALE_CURSOR`，需从第一页重查；损坏或不匹配的游标返回 `INVALID_CURSOR`。
 - 查询不叠加 URL `viewId`、个人或保存的视图筛选。接口异常会明确失败，不自动改成全表扫描。
-- 字段值沿用读取工具的格式，`fields` 在本机选择输出字段。图片/附件仅返回元数据，不包含下载 `locator`；下载仍须通过 `wecom_read_records` 取得定位器。
-- 条件查询从 `0.5.0` 起提供；使用 npm 时将 MCP 配置中的固定版本升级为 `0.5.0`，然后重连。
+- 字段值沿用读取工具的格式，`fields` 在本机选择输出字段。默认只返回正文、状态、选项、链接与文件定位等信息，省略原始富文本 `fragments`；确需片段时传 `include_text_fragments: true`，后续页会自动沿用该设置。图片/附件的完整 `locator` 可直接交给 `wecom_download_asset`。
+- 条件查询从 npm `0.5.0` 起提供；按子表获取结构、查询结果直接下载、翻页沿用字段及默认省略原始片段从 `0.6.0` 起提供。升级后请重新从第一页开始读取，不复用旧版游标。
 
 ## 写入范围与核对
 
@@ -163,7 +167,7 @@ tool_timeout_sec = 1200
 - **文档类型**：支持 `/smartsheet/` 智能表格；传入 `/sheet/` 普通在线表格会返回 `UNSUPPORTED_TYPE`。
 - **读取范围**：`wecom_read_records` 始终按当前用户在整张子表中的可访问范围分页，**忽略 URL 中的 `viewId` 及任何视图筛选条件**（视图的筛选配置可在 `wecom_table_structure` 返回值中查看）。条件查询请使用 `wecom_query_records`，仅应用显式传入的条件。
 - **分页与游标**：每页 1–200 条（默认 50），返回总记录数、当前页范围、返回条数、`has_more` 及 `next_cursor`。翻页中途若子表版本变化会返回 `STALE_CURSOR`，需从第一页重读以免遗漏或重复。分页范围不等于界面行号，记录顺序也不保证与界面视图排序一致。
-- **输出大小限制**：单次工具 JSON 响应上限为 1 MiB，超限时可调小 `page_size` 或通过 `fields` 仅选择所需字段（字段过滤在本机完成，底层分块接口仍按页拉取整行数据）。
+- **输出大小限制**：单次工具 JSON 响应上限为 1 MiB。默认省略原始富文本片段，确需时设置 `include_text_fragments: true`；仍超限时可调小 `page_size` 或通过 `fields` 仅选择所需字段（字段过滤在本机完成，底层分块接口仍按页拉取整行数据）。
 - **缺失值与派生值**：`not_returned` 表示服务端未下发该单元格（不等同于空值）；`unresolved` 表示未解析出标准字段值（不等同于空值，也不代表服务端仍在计算；部分派生字段可能同时附带 `computed_result`）。
 - **图片与附件**：仅识别字段类型为 `IMAGE` / `ATTACHMENT` 的文件，正文中的普通 URL 保持为文本，不会当作附件下载。开启 `inline_image: true` 时，4 MiB 以内且格式支持的图片会同时返回 MCP image 载荷，所有下载文件均保存在本机并返回本地路径。
 - **附件类型支持**：直接上传的 `SS_File` 附件支持下载原始文件；微盘（`Wedrive`）附件目前仅支持识别无权限状态（`ATTACHMENT_ACCESS_DENIED`），有权限的微盘文件下载暂未支持，遇到未适配的响应页面会直接报错，不会把预览网页当成附件保存。
@@ -277,10 +281,10 @@ npm publish
 
 终端无法自动打开浏览器时，使用 `npm publish --browser=false`，按终端给出的 npm 链接手动完成 2FA；发布进程会等待认证结果。
 
-`publishConfig` 已指定 npm 官方源和公开访问。`prepublishOnly` 会在正式发布前重新运行类型检查、单元测试和当前公开文件检查，失败则中止发布。当前首次发布版本为 `0.4.0`；后续发布须使用新的版本号，并同步 `src/server.ts` 中的 MCP 服务版本和安装示例。正式发布后，核对公开版本：
+`publishConfig` 已指定 npm 官方源和公开访问。`prepublishOnly` 会在正式发布前重新运行类型检查、单元测试和当前公开文件检查，失败则中止发布。当前首次发布版本为 `0.4.0`；后续发布须使用新的版本号，并同步安装示例。MCP 服务版本自动读取 `package.json`，无需在源码中重复维护。正式发布后，核对公开版本：
 
 ```sh
-npm view wecom-smarttable-mcp@0.5.0 version --registry=https://registry.npmjs.org/
+npm view wecom-smarttable-mcp@0.6.0 version --registry=https://registry.npmjs.org/
 ```
 
 详细的协议分析与验证记录见 [VALIDATION.md](VALIDATION.md)。

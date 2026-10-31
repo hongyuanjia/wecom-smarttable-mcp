@@ -36,8 +36,12 @@ export function queryFingerprint(spec: unknown, fields: string[]) {
   return createHash('sha256').update(JSON.stringify({ spec, fields })).digest('hex');
 }
 
+function isObject(value: any): value is Record<string, any> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 export function parseQueryResult(response: any, sheetId: string, limit: number) {
-  requireData(response.retcode === 0 && response.result, '筛选查询缺少明确的成功结果。');
+  requireData(isObject(response) && response.retcode === 0 && isObject(response.result), '筛选查询缺少明确的成功结果。');
   const result = response.result;
   if (result.data_initing) throw new WecomError('DATA_NOT_READY', '查询数据仍在初始化，请稍后重新查询。');
   requireData(result.data_initing === false && Number.isSafeInteger(result.total) && result.total >= 0
@@ -47,14 +51,16 @@ export function parseQueryResult(response: any, sheetId: string, limit: number) 
   requireData(Array.isArray(groups) && groups.length === 1 && Array.isArray(groups[0]) && groups[0].length === 1, '筛选查询命令数量发生变化。');
   const command = groups[0][0];
   requireData(command?.t === 3028 && command.v === 5 && command.c?.k1 === sheetId, '筛选查询命令类型、版本或子表不匹配。');
-  const delta = command.c.k2 || {};
-  const map = delta.k1 || {};
-  requireData(typeof map === 'object' && !Array.isArray(map), '筛选查询记录映射无效。');
+  const delta = command.c.k2 === undefined ? {} : command.c.k2;
+  requireData(isObject(delta), '筛选查询记录 delta 无效。');
+  const map = delta.k1 === undefined ? {} : delta.k1;
+  requireData(isObject(map), '筛选查询记录映射无效。');
   const records = Object.entries(map).map(([id, row]: [string, any]) => {
     requireData(Array.isArray(row?.k2), '筛选查询单元格结构发生变化。');
-    const cells: Record<string, any> = {};
+    const cells: Record<string, any> = Object.create(null);
     for (const cell of row.k2) {
-      requireData(typeof cell.k100 === 'string' && !Object.hasOwn(cells, cell.k100), '筛选查询单元格缺少字段 ID 或字段重复。');
+      requireData(isObject(cell) && typeof cell.k100 === 'string' && cell.k100.length > 0
+        && !Object.hasOwn(cells, cell.k100), '筛选查询单元格缺少字段 ID 或字段重复。');
       cells[cell.k100] = cell;
     }
     return { id, raw: { k1: cells } };

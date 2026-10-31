@@ -15,9 +15,10 @@ const INLINE_BYTES = 4 * 1024 * 1024;
 async function freshAsset(client: WecomClient, input: string, locator: Locator): Promise<Asset> {
   const doc = documentUrl(input);
   if (doc.id !== locator.document_id) throw new WecomError('INVALID_ASSET_LOCATOR', '附件定位不属于此智能表格。');
-  const chunk = await client.chunk(doc.id, locator.sheet_id, locator.chunk_start, locator.chunk_size);
-  const record = chunk.records.find(r => r.id === locator.record_id);
-  if (!record) throw new WecomError('STALE_ASSET_LOCATOR', '来源页已不包含该记录，请重新读取记录获取附件定位。');
+  const record = 'source' in locator
+    ? await client.recordById(doc.id, locator.sheet_id, locator.record_id)
+    : (await client.chunk(doc.id, locator.sheet_id, locator.chunk_start, locator.chunk_size)).records.find(r => r.id === locator.record_id);
+  if (!record) throw new WecomError('STALE_ASSET_LOCATOR', '来源记录不存在、不可读取或已移出原分页范围，请重新读取或查询记录获取附件定位。');
   const field = cellsFor(record.raw)[locator.field_id];
   const asset = assetsFor(field).find(a => a.id === locator.asset_id);
   if (!asset) throw new WecomError('ASSET_NOT_FOUND', '这条记录的指定字段中已不存在该图片或附件。');

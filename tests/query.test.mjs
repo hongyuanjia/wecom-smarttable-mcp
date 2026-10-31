@@ -2,25 +2,51 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { querySpec, parseQueryResult, queryFingerprint } from '../dist/query.js';
-import { presentRecord } from '../dist/protocol.js';
+import { parseReadCursor, parseQueryCursor } from '../dist/cursor.js';
+import { presentRecord, selectFields } from '../dist/protocol.js';
 const fixture = JSON.parse(await readFile(new URL('fixtures/query-records.json', import.meta.url)));
 const response = { retcode: 0, result: fixture.query_result };
 const schema = { fields: fixture.columns, views: [], raw: {} };
 const text = schema.fields.find(f => f.type_code === 1);
 const select = schema.fields.find(f => f.id === fixture.filter_field_id);
 
-test('真实查询响应解析单元格列表，保留记录及字段值，不伪造下载 locator', () => {
+test('真实查询响应解析单元格列表，保留记录及字段值', () => {
   const q = parseQueryResult(response, fixture.sheet_id, 3);
   assert.equal(q.records.length, 3);
   assert.equal(q.total, 7);
   assert.equal(q.hasMore, true);
   const chunk = { sheetId: fixture.sheet_id, raw: q.raw };
   for (const row of q.records) {
-    const result = presentRecord(chunk, schema, row, 'id_example_document', schema.fields.map(f => f.id), false);
+    const result = presentRecord(chunk, schema, row, 'id_example_document', schema.fields.map(f => f.id));
     assert.equal(result.fields[select.id].status, 'present');
     assert.deepEqual(result.fields[select.id].value, [select.options[0].id]);
     assert.ok(result.fields[text.id].text.length > 0);
   }
+});
+
+test('省略原始文本片段时，正文、状态、选项及链接保持一致', () => {
+  const page = parseQueryResult(response, fixture.sheet_id, 3);
+  const source = { sheetId: fixture.sheet_id, raw: page.raw };
+  const fields = schema.fields.map(f => f.id);
+  for (const row of page.records) {
+    const full = presentRecord(source, schema, row, 'id_example_document', fields, true);
+    const brief = presentRecord(source, schema, row, 'id_example_document', fields);
+    assert.ok('fragments' in full.fields[text.id]);
+    assert.equal('fragments' in brief.fields[text.id], false);
+    for (const cell of Object.values(full.fields)) delete cell.fragments;
+    assert.deepEqual(brief, full);
+  }
+});
+
+test('服务端字段字典重排不改变请求字段和记录字段的输出顺序', () => {
+  const ids = [text.id, select.id];
+  const reversed = { ...schema, fields: [...schema.fields].reverse() };
+  assert.deepEqual(selectFields(schema, ids), selectFields(reversed, ids));
+  assert.deepEqual(selectFields(reversed, ids).map(field => field.id), ids);
+  const page = parseQueryResult(response, fixture.sheet_id, 3);
+  const source = { sheetId: fixture.sheet_id, raw: page.raw };
+  assert.deepEqual(Object.keys(presentRecord(source, reversed, page.records[0], 'id_example_document', ids).fields), ids);
+  assert.throws(() => selectFields(schema, ['id_example_unknown']), e => e.code === 'UNKNOWN_FIELD');
 });
 
 test('字段类型决定真实筛选参数，文本与单选值使用不同协议', () => {
@@ -56,4 +82,62 @@ test('真实无匹配响应没有记录 delta，正确返回零而非解析失�
   assert.equal(result.total, 0);
   assert.equal(result.hasMore, false);
   assert.equal(result.nextCursor, '');
+});
+
+test('真实按 ID 回读保留附件归属，查询 locator 不依赖整表分页位置', async () => {
+  const fixture = JSON.parse(await readFile(new URL('fixtures/record-query.json', import.meta.url)));
+  const schema = { fields: fixture.columns, views: [], raw: {} };
+  const page = parseQueryResult({ retcode: 0, result: fixture.query_result }, fixture.sheet_id, 1);
+  assert.equal(page.records[0].id, fixture.record_id);
+  const result = presentRecord({ sheetId: fixture.sheet_id, raw: page.raw }, schema, page.records[0], 'id_example_document', schema.fields.map(f => f.id));
+  const assets = Object.entries(result.fields).flatMap(([fieldId, cell]) => cell.assets.map(asset => ({ fieldId, asset })));
+  assert.ok(assets.length > 0);
+  for (const { fieldId, asset } of assets) {
+    assert.deepEqual(asset.locator, { document_id: 'id_example_document', sheet_id: fixture.sheet_id,
+      record_id: fixture.record_id, field_id: fieldId, asset_id: asset.id, source: 'record_query' });
+    assert.equal('url' in asset, false);
+  }
+  const absent = parseQueryResult({ retcode: 0, result: fixture.missing_query_result }, fixture.sheet_id, 1);
+  assert.equal(absent.total, 1); // 按 ID 查询的 total 是请求数量，不代表记录确实存在。
+  assert.deepEqual(absent.records, []);
+});
+
+test('查询游标保留字段选择，拒绝损坏数据及不匹配的文档/子表', () => {
+  const position = { v: 4, document_id: 'id_example_document', sheet_id: fixture.sheet_id,
+    revision: 1, fingerprint: queryFingerprint({}, [text.id]), offset: 1, token: 'value_example_server_cursor', fields: [text.id], include_text_fragments: false };
+  const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+  assert.deepEqual(parseQueryCursor(encode(position), position.document_id, position.sheet_id), position);
+  const brief = { ...position, include_text_fragments: false };
+  assert.equal(parseQueryCursor(encode(brief), position.document_id, position.sheet_id).include_text_fragments, false);
+  for (const input of ['invalid', encode(null), encode({ ...position, revision: -1 }), encode({ ...position, v: 2 }),
+    encode({ ...position, fields: [null] }), encode({ ...position, fingerprint: null }),
+    encode({ ...position, document_id: 'id_example_other_document' })]) {
+    assert.throws(() => parseQueryCursor(input, position.document_id, position.sheet_id), e => e.code === 'INVALID_CURSOR');
+  }
+});
+
+test('普通读取游标同样验证字段和输出设置，损坏输入统一为 INVALID_CURSOR', () => {
+  const position = { v: 3, document_id: 'id_example_document', sheet_id: fixture.sheet_id,
+    revision: 1, offset: 1, fields: [text.id], include_text_fragments: false };
+  const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+  assert.deepEqual(parseReadCursor(encode(position), position.document_id, position.sheet_id), position);
+  for (const value of ['invalid', encode(null), encode({ ...position, fields: [null] }),
+    encode({ ...position, fields: undefined }), encode({ ...position, include_text_fragments: 'false' })]) {
+    assert.throws(() => parseReadCursor(value, position.document_id, position.sheet_id), e => e.code === 'INVALID_CURSOR');
+  }
+});
+
+test('损坏的查询 delta/记录映射/单元格结构明确返回 PARSE_ERROR', () => {
+  const corrupt = change => {
+    const r = structuredClone(response);
+    const commands = JSON.parse(r.result.mutation_json);
+    change(commands[0][0].c);
+    r.result.mutation_json = JSON.stringify(commands);
+    return r;
+  };
+  for (const change of [c => { c.k2 = null; }, c => { c.k2.k1 = false; },
+    c => { Object.values(c.k2.k1)[0].k2[0] = null; },
+    c => { const cells = Object.values(c.k2.k1)[0].k2; cells.push(cells[0]); }]) {
+    assert.throws(() => parseQueryResult(corrupt(change), fixture.sheet_id, 3), e => e.code === 'PARSE_ERROR');
+  }
 });

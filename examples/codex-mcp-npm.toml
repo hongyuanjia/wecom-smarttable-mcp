@@ -3,6 +3,6 @@
 # 并确保该进程的 PATH 中包含 Node.js 22+。
 [mcp_servers.wecom_smarttable]
 command = "npx"
-args = ["-y", "wecom-smarttable-mcp@0.5.0"]
+args = ["-y", "wecom-smarttable-mcp@0.6.0"]
 startup_timeout_sec = 120
 tool_timeout_sec = 1200
