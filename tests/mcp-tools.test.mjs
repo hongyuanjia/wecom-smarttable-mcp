@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
-test('真实 stdio MCP 公布十个工具，删除入口拒绝标题和永久删除参数', async () => {
+test('真实 stdio MCP 公布十一个工具，删除入口拒绝标题和永久删除参数', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'wecom-tool-contract-'));
   const client = new Client({ name: 'wecom-tool-contract', version: '0.4.0' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('dist/server.js')], env: { WECOM_MCP_DATA_DIR: dataDir }, stderr: 'pipe' });
@@ -15,10 +15,13 @@ test('真实 stdio MCP 公布十个工具，删除入口拒绝标题和永久删
   try {
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, 10);
+    assert.equal(tools.length, 11);
     for (const name of ['create_table', 'update_records', 'add_records', 'delete_records', 'add_fields', 'delete_fields', 'delete_table']) {
       assert.equal(tools.find(t => t.name === `wecom_${name}`).annotations.readOnlyHint, false);
     }
+    const query = tools.find(t => t.name === 'wecom_query_records');
+    assert.equal(query.annotations.readOnlyHint, true);
+    assert.equal(query.inputSchema.additionalProperties, false);
     const removal = tools.find(t => t.name === 'wecom_delete_table');
     assert.equal(removal.annotations.destructiveHint, true);
     assert.equal(removal.inputSchema.additionalProperties, false);

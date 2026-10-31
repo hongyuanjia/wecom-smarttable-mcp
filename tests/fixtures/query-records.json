@@ -1,0 +1,116 @@
+{
+  "sheet_id": "id_example_query_000001",
+  "filter_field_id": "id_example_query_000004",
+  "columns": [
+    {
+      "id": "id_example_query_000008",
+      "name": "id_example_query_000027",
+      "type_code": 17,
+      "type": "value_example_field_type",
+      "is_primary": false,
+      "options": [
+        {
+          "id": "id_example_query_000028",
+          "name": "id_example_query_000029"
+        },
+        {
+          "id": "id_example_query_000030",
+          "name": "id_example_query_000031"
+        },
+        {
+          "id": "id_example_query_000013",
+          "name": "id_example_query_000032"
+        },
+        {
+          "id": "id_example_query_000007",
+          "name": "id_example_query_000033"
+        }
+      ]
+    },
+    {
+      "id": "id_example_query_000034",
+      "name": "id_example_query_000035",
+      "type_code": 17,
+      "type": "value_example_field_type",
+      "is_primary": false,
+      "options": [
+        {
+          "id": "id_example_query_000036",
+          "name": "id_example_query_000037"
+        },
+        {
+          "id": "id_example_query_000038",
+          "name": "id_example_query_000039"
+        }
+      ]
+    },
+    {
+      "id": "id_example_query_000006",
+      "name": "id_example_query_000040",
+      "type_code": 1,
+      "type": "value_example_field_type",
+      "is_primary": false
+    },
+    {
+      "id": "id_example_query_000004",
+      "name": "id_example_query_000041",
+      "type_code": 17,
+      "type": "value_example_field_type",
+      "is_primary": false,
+      "options": [
+        {
+          "id": "id_example_query_000003",
+          "name": "id_example_query_000042"
+        },
+        {
+          "id": "id_example_query_000043",
+          "name": "id_example_query_000044"
+        },
+        {
+          "id": "id_example_query_000045",
+          "name": "id_example_query_000046"
+        },
+        {
+          "id": "id_example_query_000047",
+          "name": "id_example_query_000048"
+        },
+        {
+          "id": "id_example_query_000049",
+          "name": "id_example_query_000050"
+        },
+        {
+          "id": "id_example_query_000051",
+          "name": "id_example_query_000052"
+        }
+      ]
+    },
+    {
+      "id": "id_example_query_000053",
+      "name": "id_example_query_000054",
+      "type_code": 1,
+      "type": "value_example_field_type",
+      "is_primary": false
+    },
+    {
+      "id": "id_example_query_000055",
+      "name": "id_example_query_000056",
+      "type_code": 1,
+      "type": "value_example_field_type",
+      "is_primary": false
+    }
+  ],
+  "query_result": {
+    "mutation_json": "[[{\"t\":3028,\"v\":5,\"c\":{\"k1\":\"id_example_query_000001\",\"k2\":{\"k1\":{\"id_example_query_000002\":{\"k2\":[{\"k17\":[\"id_example_query_000003\"],\"k30\":17,\"k100\":\"id_example_query_000004\"},{\"k1\":[{\"k1\":\"text\",\"k2\":\"id_example_query_000005\"}],\"k30\":1,\"k100\":\"id_example_query_000006\"},{\"k17\":[\"id_example_query_000007\"],\"k30\":17,\"k100\":\"id_example_query_000008\"}]},\"id_example_query_000009\":{\"k2\":[{\"k17\":[\"id_example_query_000003\"],\"k30\":17,\"k100\":\"id_example_query_000004\"},{\"k1\":[{\"k1\":\"text\",\"k2\":\"id_example_query_000010\"},{\"k2\":\"id_example_query_000011\",\"k1\":\"text\"},{\"k2\":\"id_example_query_000012\",\"k1\":\"text\"}],\"k30\":1,\"k100\":\"id_example_query_000006\"},{\"k17\":[\"id_example_query_000013\"],\"k30\":17,\"k100\":\"id_example_query_000008\"}]},\"id_example_query_000014\":{\"k2\":[{\"k17\":[\"id_example_query_000003\"],\"k30\":17,\"k100\":\"id_example_query_000004\"},{\"k1\":[{\"k2\":\"id_example_query_000015\",\"k1\":\"text\"}],\"k30\":1,\"k100\":\"id_example_query_000006\"}]}},\"k2\":{\"id_example_query_000009\":{\"k1\":\"id_example_query_000016\",\"k2\":\"id_example_query_000017\",\"k31\":\"id_example_query_000017\",\"k32\":\"id_example_query_000018\"},\"id_example_query_000002\":{\"k1\":\"id_example_query_000019\",\"k2\":\"id_example_query_000017\",\"k31\":\"id_example_query_000017\",\"k32\":\"id_example_query_000020\"},\"id_example_query_000014\":{\"k1\":\"id_example_query_000021\",\"k2\":\"id_example_query_000017\",\"k31\":\"id_example_query_000017\",\"k32\":\"id_example_query_000022\"}},\"k6\":{\"k1\":{\"id_example_query_000002\":\"id_example_query_000023\",\"id_example_query_000009\":\"id_example_query_000024\",\"id_example_query_000014\":\"id_example_query_000025\"}}}},\"o\":0,\"isVisible\":true,\"p\":\"id_example_query_000026\"}]]",
+    "data_initing": false,
+    "total": 7,
+    "has_more": true,
+    "next_cursor": "id_example_query_000057"
+  },
+  "empty_query_result": {
+    "mutation_json": "[[{\"t\":3028,\"v\":5,\"c\":{\"k1\":\"id_example_query_000001\"},\"o\":0,\"isVisible\":true,\"p\":\"value_example_protocol_metadata\"}]]",
+    "data_initing": false,
+    "total": 0,
+    "has_more": false,
+    "next_cursor": ""
+  }
+}

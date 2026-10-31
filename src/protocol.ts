@@ -107,7 +107,12 @@ export function assetsFor(cell: Raw | undefined): Asset[] {
   });
 }
 
-export function presentRecord(chunk: Chunk, schema: Schema, row: { id: string; raw: Raw }, docId: string, selected: string[]) {
+export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pick<Chunk, 'start' | 'end'>>, schema: Schema, row: { id: string; raw: Raw }, docId: string, selected: string[], includeAssetLocator = true) {
+  let assetRange: { chunk_start: number; chunk_size: number } | undefined;
+  if (includeAssetLocator) {
+    requireData(chunk.start !== undefined && chunk.end !== undefined, '附件定位器需要真实整表分块范围。');
+    assetRange = { chunk_start: chunk.start, chunk_size: chunk.end - chunk.start + 1 };
+  }
   const cells = cellsFor(row.raw);
   requireData(Object.keys(cells).every(id => schema.fields.some(f => f.id === id)), '记录中出现字段定义未包含的字段，拒绝静默遗漏。');
   const values: Raw = {};
@@ -117,8 +122,8 @@ export function presentRecord(chunk: Chunk, schema: Schema, row: { id: string; r
     if ([5, 6].includes(field.type_code)) {
       values[field.id] = { status: cell ? 'present' : 'not_returned', assets: assetsFor(cell).map(asset => {
         const { url: _privateUrl, ...publicAsset } = asset;
-        return { ...publicAsset, locator: { document_id: docId, sheet_id: chunk.sheetId, record_id: row.id,
-          chunk_start: chunk.start, chunk_size: chunk.end - chunk.start + 1, field_id: field.id, asset_id: asset.id } satisfies Locator };
+        return { ...publicAsset, ...(assetRange ? { locator: { document_id: docId, sheet_id: chunk.sheetId, record_id: row.id,
+          ...assetRange, field_id: field.id, asset_id: asset.id } satisfies Locator } : {}) };
       }) };
     } else if (field.type_code === 10) {
       const created = chunk.raw.k2?.[row.id];

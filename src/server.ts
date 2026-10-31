@@ -58,6 +58,13 @@ serveStdio(() => {
     inputSchema: z.strictObject({ url, sheet_id: id, page_size: z.number().int().min(1).max(200).default(50),
       fields: z.array(id).min(1).max(500).optional(), cursor: z.string().max(16384).describe('原样传回上一页的 next_cursor。').optional() }) },
     (args, ctx) => run('wecom_read_records', args, ctx, async client => ({ result: await client.readRecords(args.url, args.sheet_id, args.page_size, args.fields, args.cursor) })));
+  server.registerTool('wecom_query_records', { description: '服务端按条件筛选并分页返回匹配记录，无需全表扫描。先查结构获取字段/选项 ID；TEXT 支持 eq（服务端相等，仅单行查询值）/contains（包含），SINGLE_SELECT 支持 eq（value 传选项 ID）。支持 and/or。后续页必须保持条件和 fields 一致。忽略 URL 视图筛选。图片/附件仅返回元数据，不提供下载 locator；下载须用 wecom_read_records。遇 STALE_CURSOR 从第一页重新查询。', annotations,
+    inputSchema: z.strictObject({ url, sheet_id: id,
+      filter: z.strictObject({ conjunction: z.enum(['and', 'or']).default('and'), conditions: z.array(z.strictObject({
+        field_id: id, operator: z.enum(['eq', 'contains']), value: z.string().min(1).max(4096),
+      })).min(1).max(20) }), page_size: z.number().int().min(1).max(200).default(50),
+      fields: z.array(id).min(1).max(500).optional(), cursor: z.string().max(16384).optional() }) },
+    (args, ctx) => run('wecom_query_records', args, ctx, async client => ({ result: await client.queryRecords(args.url, args.sheet_id, args.filter, args.page_size, args.fields, args.cursor) })));
   server.registerTool('wecom_download_asset', { description: '按记录返回的完整 locator 下载单个原图或附件到本机（需传同一表格链接，不支持下载正文普通 URL）。默认不内联图片，inline_image=true 时对不超过 4 MiB、且格式受支持的图片同时返回 MCP 图像。',
     annotations: { ...annotations, readOnlyHint: false },
     inputSchema: z.strictObject({ url, locator, inline_image: z.boolean().default(false) }) },

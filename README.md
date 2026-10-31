@@ -85,6 +85,7 @@ tool_timeout_sec = 1200
 | 工具 | 用途 |
 | --- | --- |
 | `wecom_table_structure` | 获取所有子表、字段定义（ID/名称/类型/标题列标记）、视图与筛选配置、记录总数及版本号（`revision`） |
+| `wecom_query_records` | 按字段条件在服务端筛选，分页返回匹配记录；支持文本、单选及 AND/OR 组合 |
 | `wecom_read_records` | 按子表分页读取记录，可指定字段 ID，返回字段值及图片/附件 `locator` |
 | `wecom_download_asset` | 校验 `locator` 所属记录与字段后下载单个原图或附件；小图片可选同时返回 MCP 图像 |
 | `wecom_create_table` | 在个人目录新建智能表格，回读并返回链接、默认表结构与初始记录数 |
@@ -107,6 +108,32 @@ tool_timeout_sec = 1200
 - “把这个链接对应的智能表格移到回收站：`<链接>`”
 
 基本调用顺序：操作已有表格时，先调 `wecom_table_structure` 获取 `sheet_id` 和字段 ID，再调 `wecom_read_records` 分页读取；翻页时原样传回上一页的 `next_cursor`。下载图片或附件时，传入记录中的完整 `locator` 与同一表格链接。`locator` 由来源分页范围与记录/字段/文件 ID 组合而成（并非界面行号），跨会话仍可校验；若原分页范围已不含该记录，重新读取对应记录后再下载即可。
+
+## 按条件检索记录
+
+先调用 `wecom_table_structure` 获取真实子表、字段及选项 ID，再调用 `wecom_query_records`。筛选在企业微信服务端执行，只分页返回匹配记录，不扫描整张子表；每次查询额外读取首条分块以取得结构和核对版本。
+
+```json
+{
+  "url": "<智能表格链接>",
+  "sheet_id": "<子表 ID>",
+  "filter": {
+    "conjunction": "and",
+    "conditions": [
+      { "field_id": "<状态字段 ID>", "operator": "eq", "value": "<状态选项 ID>" },
+      { "field_id": "<问题描述字段 ID>", "operator": "contains", "value": "登录" }
+    ]
+  },
+  "page_size": 50
+}
+```
+
+- 支持 `TEXT` 的 `eq`（服务端相等，仅单行查询值）和 `contains`（包含）、`SINGLE_SELECT` 的 `eq`（传已有选项 ID）；最多 20 个条件，通过 `and`/`or` 连接。其他字段和运算符尚未验证，会明确报错。
+- 含换行查询值的文本 `eq` 在真实接口中出现与读取值不一致的结果，当前拒绝此用法；可使用单行关键词 `contains`。
+- 返回 `total_matching_records`、`records`、`has_more`、`next_cursor`。每页默认 50 条，最多 200 条；翻页时继续传入同一条件和同一 `fields`，并原样传回游标。版本变化返回 `STALE_CURSOR`，需从第一页重查。
+- 查询不叠加 URL `viewId`、个人或保存的视图筛选。接口异常会明确失败，不自动改成全表扫描。
+- 字段值沿用读取工具的格式，`fields` 在本机选择输出字段。图片/附件仅返回元数据，不包含下载 `locator`；下载仍须通过 `wecom_read_records` 取得定位器。
+- 本地源码构建并重连 MCP 后可使用新工具；npm 固定版本 `0.4.0` 尚不包含此能力。
 
 ## 写入范围与核对
 
@@ -134,7 +161,7 @@ tool_timeout_sec = 1200
 ## 读取范围与附件下载
 
 - **文档类型**：支持 `/smartsheet/` 智能表格；传入 `/sheet/` 普通在线表格会返回 `UNSUPPORTED_TYPE`。
-- **读取范围**：`wecom_read_records` 始终按当前用户在整张子表中的可访问范围分页，**忽略 URL 中的 `viewId` 及任何视图筛选条件**（视图的筛选配置可在 `wecom_table_structure` 返回值中查看）。暂不提供自定义筛选查询工具。
+- **读取范围**：`wecom_read_records` 始终按当前用户在整张子表中的可访问范围分页，**忽略 URL 中的 `viewId` 及任何视图筛选条件**（视图的筛选配置可在 `wecom_table_structure` 返回值中查看）。条件查询请使用 `wecom_query_records`，仅应用显式传入的条件。
 - **分页与游标**：每页 1–200 条（默认 50），返回总记录数、当前页范围、返回条数、`has_more` 及 `next_cursor`。翻页中途若子表版本变化会返回 `STALE_CURSOR`，需从第一页重读以免遗漏或重复。分页范围不等于界面行号，记录顺序也不保证与界面视图排序一致。
 - **输出大小限制**：单次工具 JSON 响应上限为 1 MiB，超限时可调小 `page_size` 或通过 `fields` 仅选择所需字段（字段过滤在本机完成，底层分块接口仍按页拉取整行数据）。
 - **缺失值与派生值**：`not_returned` 表示服务端未下发该单元格（不等同于空值）；`unresolved` 表示未解析出标准字段值（不等同于空值，也不代表服务端仍在计算；部分派生字段可能同时附带 `computed_result`）。

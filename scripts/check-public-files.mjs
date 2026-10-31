@@ -65,7 +65,7 @@ export function inspectPublicFile(path, input) {
         return;
       }
     }
-    if (fixture && !safeFixtureStrings.has(value)
+    if (fixture && value !== '' && !safeFixtureStrings.has(value)
       && !/^(?:id_example_|value_example_|file-example-)/.test(value)
       && !/^https:\/\/(?:wdcdn\.qpic\.cn|doc\.weixin\.qq\.com|drive\.weixin\.qq\.com)\/redacted\//.test(value)
       && !/^\*ss\*\[redacted-reference-/.test(value)

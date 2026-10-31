@@ -1,3 +1,4 @@
+import { querySpec, queryFingerprint, parseQueryResult, type QueryFilter } from './query.js';
 import { request, type APIRequestContext } from 'playwright';
 import { lstat, readFile } from 'node:fs/promises';
 import { WecomError, requireData } from './errors.js';
@@ -5,7 +6,7 @@ import { documentUrl, statePath } from './local.js';
 import { parseChunk, parseJson, presentRecord, type Chunk, type Schema } from './protocol.js';
 
 const DOC = 'https://doc.weixin.qq.com';
-const READ_PATHS = new Set(['/cgi-bin/online_docs/user_info', '/dop-api/opendoc', '/dop-api/get/sheet', '/api/smartsheet/reader/fetch_view_filter_spec',
+const READ_PATHS = new Set(['/api/smartsheet/reader/query_sheet_data', '/cgi-bin/online_docs/user_info', '/dop-api/opendoc', '/dop-api/get/sheet', '/api/smartsheet/reader/fetch_view_filter_spec',
   '/diskauth/get_auth_info', '/diskfile/recycle_list', '/diskfile/querytaskresult']);
 type Raw = Record<string, any>;
 
@@ -130,6 +131,47 @@ export class WecomClient {
       record_scope: 'whole_table_accessible_to_current_user', view_filter_applied: false,
       note: '记录工具按整张子表读取；URL 中的 viewId 及个人/保存的视图筛选不作用于记录结果。服务端内容权限仍有效。',
       sheets, other_entries: directory.filter((s: Raw) => s.type !== 'smartsheet').map((s: Raw) => ({ id: s.id, name: s.name, type: s.type })) };
+  }
+
+  async queryRecords(input: string, sheetId: string, filter: QueryFilter, pageSize: number, fields?: string[], cursor?: string) {
+    const doc = documentUrl(input);
+    await this.checkSession();
+    const first = await this.chunk(doc.id, sheetId, 0, 1);
+    const schema = await this.schema(doc.id, first);
+    const selected = fields || schema.fields.map(f => f.id);
+    if (selected.some(id => !schema.fields.some(f => f.id === id))) throw new WecomError('UNKNOWN_FIELD', '字段选择包含不存在或不可读取的字段 ID。');
+    const spec = querySpec(schema, filter);
+    const fingerprint = queryFingerprint(spec, selected);
+    let position: any;
+    if (cursor) {
+      position = parseJson(Buffer.from(cursor, 'base64url').toString('utf8'), '查询游标');
+      if (position?.v !== 2 || position.document_id !== doc.id || position.sheet_id !== sheetId
+        || position.fingerprint !== fingerprint || !Number.isSafeInteger(position.revision)
+        || !Number.isSafeInteger(position.offset) || position.offset < 1 || typeof position.token !== 'string' || !position.token.length) {
+        throw new WecomError('INVALID_CURSOR', '查询游标与文档、子表、条件或字段选择不匹配。后续页须传相同条件和字段。');
+      }
+      if (position.revision !== first.revision) throw new WecomError('STALE_CURSOR', '查询期间表格版本变化，请从第一页重新查询。');
+    }
+    const response = await this.json('/api/smartsheet/reader/query_sheet_data', {
+      sid: this.cookie('wedoc_sid'), wedoc_xsrf: this.cookie('low_login_enable'),
+    }, { pad_id: doc.id, sub_id: sheetId, version: first.revision, and_filter_specs: [spec],
+      limit: pageSize, need_total: true, ...(position ? { cursor: position.token } : {}) });
+    const result = parseQueryResult(response, sheetId, pageSize);
+    const after = await this.chunk(doc.id, sheetId, 0, 1);
+    if (after.revision !== first.revision) throw new WecomError('STALE_CURSOR', '查询期间表格版本变化，请从第一页重新查询。');
+    const offset = (position?.offset || 0) + result.records.length;
+    requireData(result.hasMore ? offset < result.total && result.nextCursor !== position?.token : offset === result.total, '筛选查询累计数量与总数不符。');
+    const source = { sheetId, raw: result.raw };
+    return { document_id: doc.id, sheet_id: sheetId, revision: first.revision,
+      filter_applied: true, filter_execution: 'server', filter, view_filter_applied: false,
+      ignored_url_view_id: doc.url.searchParams.get('viewId'), scope: 'matching_records_accessible_to_current_user',
+      total_matching_records: result.total, returned_count: result.records.length,
+      columns: schema.fields.filter(f => selected.includes(f.id)),
+      records: result.records.map(row => presentRecord(source, schema, row, doc.id, selected, false)),
+      has_more: result.hasMore, next_cursor: result.hasMore ? Buffer.from(JSON.stringify({ v: 2, document_id: doc.id,
+        sheet_id: sheetId, revision: first.revision, fingerprint, offset, token: result.nextCursor })).toString('base64url') : null,
+      limitations: ['只应用显式传入的条件，不叠加 URL 视图筛选。', '图片和附件返回元数据，不包含下载 locator；下载仍需用 wecom_read_records 获取 locator。',
+        'not_returned 不等同于空值，unresolved 不等同于完整派生值。'] };
   }
 
   async readRecords(input: string, sheetId: string, pageSize: number, fields?: string[], cursor?: string) {
