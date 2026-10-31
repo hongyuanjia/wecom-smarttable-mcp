@@ -1,8 +1,8 @@
-# 通过 npm 启动固定版本；更新版本时同步修改 args 中的版本号。
+# 通过 npm 启动 latest 版本；发布新版本后重连 MCP 即可使用。
 # 若 Codex 找不到 npx，将 command 改为 command -v npx 输出的绝对路径，
 # 并确保该进程的 PATH 中包含 Node.js 22+。
 [mcp_servers.wecom_smarttable]
 command = "npx"
-args = ["-y", "wecom-smarttable-mcp@0.6.0"]
+args = ["-y", "wecom-smarttable-mcp@latest"]
 startup_timeout_sec = 120
 tool_timeout_sec = 1200

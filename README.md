@@ -23,20 +23,20 @@
 直接由 MCP 客户端通过以下命令启动，无需克隆仓库或安装 TypeScript：
 
 ```sh
-npx -y wecom-smarttable-mcp@0.6.0
+npx -y wecom-smarttable-mcp@latest
 ```
 
 这是 stdio 服务，直接在终端执行后会等待 MCP 请求；正常使用时由客户端启动。首次运行需联网下载 npm 包及运行依赖，后续复用 npm 缓存。也可以全局安装：
 
 ```sh
-npm install -g wecom-smarttable-mcp@0.6.0
+npm install -g wecom-smarttable-mcp@latest
 wecom-smarttable-mcp
 ```
 
 如需手动登录，全局安装后运行 `wecom-smarttable-login '智能表格链接'`；未全局安装时运行：
 
 ```sh
-npx -y --package=wecom-smarttable-mcp@0.6.0 wecom-smarttable-login '智能表格链接'
+npx -y --package=wecom-smarttable-mcp@latest wecom-smarttable-login '智能表格链接'
 ```
 
 ### 从源码运行
@@ -71,12 +71,12 @@ node /absolute/path/to/wecom-smarttable-mcp/dist/server.js
 ```toml
 [mcp_servers.wecom_smarttable]
 command = "npx"
-args = ["-y", "wecom-smarttable-mcp@0.6.0"]
+args = ["-y", "wecom-smarttable-mcp@latest"]
 startup_timeout_sec = 120
 tool_timeout_sec = 1200
 ```
 
-首次下载预留 120 秒启动时间。若客户端找不到 `npx`，将 `command` 改为终端中 `command -v npx` 输出的绝对路径，并确保客户端进程的 `PATH` 中包含 Node.js 22+。示例固定使用 `0.6.0`；升级时更新版本号并重连 MCP。
+首次下载预留 120 秒启动时间。若客户端找不到 `npx`，将 `command` 改为终端中 `command -v npx` 输出的绝对路径，并确保客户端进程的 `PATH` 中包含 Node.js 22+。示例使用 `@latest`；发布新版本后重连 MCP 即可按当前 latest 版本启动，无需逐次修改配置。
 
 从源码运行时，使用 [examples/codex-mcp.toml](examples/codex-mcp.toml)。把其中的 `/absolute/path/to/` 替换为本机实际绝对路径：`command` 填 `node -p "process.execPath"` 输出的 Node 路径，`args` 和 `cwd` 填仓库路径。后续若升级或迁移 Node，需同步更新配置中的 `command`；修改代码后，重新执行 `npm run build` 并重连 MCP（或重开会话）即可生效。两份示例使用相同的服务名，选择一种配置即可。配置格式参考 [OpenAI MCP 配置文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
 
@@ -281,10 +281,10 @@ npm publish
 
 终端无法自动打开浏览器时，使用 `npm publish --browser=false`，按终端给出的 npm 链接手动完成 2FA；发布进程会等待认证结果。
 
-`publishConfig` 已指定 npm 官方源和公开访问。`prepublishOnly` 会在正式发布前重新运行类型检查、单元测试和当前公开文件检查，失败则中止发布。当前首次发布版本为 `0.4.0`；后续发布须使用新的版本号，并同步安装示例。MCP 服务版本自动读取 `package.json`，无需在源码中重复维护。正式发布后，核对公开版本：
+`publishConfig` 已指定 npm 官方源和公开访问。`prepublishOnly` 会在正式发布前重新运行类型检查、单元测试和当前公开文件检查，失败则中止发布。当前首次发布版本为 `0.4.0`；后续发布须使用新的版本号；安装示例使用 `@latest`，无需随版本修改。MCP 服务版本自动读取 `package.json`，无需在源码中重复维护。正式发布后，核对公开版本：
 
 ```sh
-npm view wecom-smarttable-mcp@0.6.0 version --registry=https://registry.npmjs.org/
+npm view wecom-smarttable-mcp@latest version --registry=https://registry.npmjs.org/
 ```
 
 详细的协议分析与验证记录见 [VALIDATION.md](VALIDATION.md)。
