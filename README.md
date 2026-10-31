@@ -23,20 +23,20 @@
 直接由 MCP 客户端通过以下命令启动，无需克隆仓库或安装 TypeScript：
 
 ```sh
-npx -y wecom-smarttable-mcp@0.4.0
+npx -y wecom-smarttable-mcp@0.5.0
 ```
 
 这是 stdio 服务，直接在终端执行后会等待 MCP 请求；正常使用时由客户端启动。首次运行需联网下载 npm 包及运行依赖，后续复用 npm 缓存。也可以全局安装：
 
 ```sh
-npm install -g wecom-smarttable-mcp@0.4.0
+npm install -g wecom-smarttable-mcp@0.5.0
 wecom-smarttable-mcp
 ```
 
 如需手动登录，全局安装后运行 `wecom-smarttable-login '智能表格链接'`；未全局安装时运行：
 
 ```sh
-npx -y --package=wecom-smarttable-mcp@0.4.0 wecom-smarttable-login '智能表格链接'
+npx -y --package=wecom-smarttable-mcp@0.5.0 wecom-smarttable-login '智能表格链接'
 ```
 
 ### 从源码运行
@@ -71,12 +71,12 @@ node /absolute/path/to/wecom-smarttable-mcp/dist/server.js
 ```toml
 [mcp_servers.wecom_smarttable]
 command = "npx"
-args = ["-y", "wecom-smarttable-mcp@0.4.0"]
+args = ["-y", "wecom-smarttable-mcp@0.5.0"]
 startup_timeout_sec = 120
 tool_timeout_sec = 1200
 ```
 
-首次下载预留 120 秒启动时间。若客户端找不到 `npx`，将 `command` 改为终端中 `command -v npx` 输出的绝对路径，并确保客户端进程的 `PATH` 中包含 Node.js 22+。示例固定使用 `0.4.0`；升级时更新版本号并重连 MCP。
+首次下载预留 120 秒启动时间。若客户端找不到 `npx`，将 `command` 改为终端中 `command -v npx` 输出的绝对路径，并确保客户端进程的 `PATH` 中包含 Node.js 22+。示例固定使用 `0.5.0`；升级时更新版本号并重连 MCP。
 
 从源码运行时，使用 [examples/codex-mcp.toml](examples/codex-mcp.toml)。把其中的 `/absolute/path/to/` 替换为本机实际绝对路径：`command` 填 `node -p "process.execPath"` 输出的 Node 路径，`args` 和 `cwd` 填仓库路径。后续若升级或迁移 Node，需同步更新配置中的 `command`；修改代码后，重新执行 `npm run build` 并重连 MCP（或重开会话）即可生效。两份示例使用相同的服务名，选择一种配置即可。配置格式参考 [OpenAI MCP 配置文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
 
@@ -133,7 +133,7 @@ tool_timeout_sec = 1200
 - 返回 `total_matching_records`、`records`、`has_more`、`next_cursor`。每页默认 50 条，最多 200 条；翻页时继续传入同一条件和同一 `fields`，并原样传回游标。版本变化返回 `STALE_CURSOR`，需从第一页重查。
 - 查询不叠加 URL `viewId`、个人或保存的视图筛选。接口异常会明确失败，不自动改成全表扫描。
 - 字段值沿用读取工具的格式，`fields` 在本机选择输出字段。图片/附件仅返回元数据，不包含下载 `locator`；下载仍须通过 `wecom_read_records` 取得定位器。
-- 本地源码构建并重连 MCP 后可使用新工具；npm 固定版本 `0.4.0` 尚不包含此能力。
+- 条件查询从 `0.5.0` 起提供；使用 npm 时将 MCP 配置中的固定版本升级为 `0.5.0`，然后重连。
 
 ## 写入范围与核对
 
@@ -280,7 +280,7 @@ npm publish
 `publishConfig` 已指定 npm 官方源和公开访问。`prepublishOnly` 会在正式发布前重新运行类型检查、单元测试和当前公开文件检查，失败则中止发布。当前首次发布版本为 `0.4.0`；后续发布须使用新的版本号，并同步 `src/server.ts` 中的 MCP 服务版本和安装示例。正式发布后，核对公开版本：
 
 ```sh
-npm view wecom-smarttable-mcp@0.4.0 version --registry=https://registry.npmjs.org/
+npm view wecom-smarttable-mcp@0.5.0 version --registry=https://registry.npmjs.org/
 ```
 
 详细的协议分析与验证记录见 [VALIDATION.md](VALIDATION.md)。
