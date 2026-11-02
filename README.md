@@ -85,7 +85,7 @@ tool_timeout_sec = 1200
 | 工具 | 用途 |
 | --- | --- |
 | `wecom_table_structure` | 获取全部或指定子表的字段定义（ID/名称/类型/标题列标记）、视图与筛选配置、记录总数及版本号（`revision`） |
-| `wecom_query_records` | 按字段条件在服务端筛选，分页返回匹配记录；支持文本/URL/电话/邮箱、单选/多选、复选框、人员、数字/进度/日期，以及按关联记录标题筛选关联/双向关联，支持 AND/OR 组合 |
+| `wecom_query_records` | 按字段条件在服务端筛选，分页返回匹配记录；文本/URL/电话/邮箱支持 eq/ne/contains/not_contains，单选支持 eq/ne，多选支持 eq/ne/contains/not_contains，另支持复选框、人员、数字/进度/日期及按关联记录标题筛选关联/双向关联，支持 AND/OR 组合 |
 | `wecom_read_records` | 按子表分页读取记录，可指定字段 ID，返回字段值及图片/附件 `locator` |
 | `wecom_download_asset` | 校验 `locator` 所属记录与字段后下载单个原图或附件；小图片可选同时返回 MCP 图像 |
 | `wecom_upload_asset` | 上传本机文件到图片/附件字段并写入记录，回读文件名、大小、MD5/URL |
@@ -148,7 +148,7 @@ tool_timeout_sec = 1200
 }
 ```
 
-- 支持 TEXT/URL/电话/邮箱与关联标题文本的 eq/ne/contains/not_contains、单选/多选的 eq/ne/contains/not_contains、复选框 eq/ne、人员 eq/ne、数字/进度比较、日期比较，以及各类型的 empty/not_empty；最多 20 个条件，通过 `and`/`or` 连接。
+- 支持 TEXT/URL/电话/邮箱与关联标题文本的 eq/ne/contains/not_contains、单选 eq/ne、多选 eq/ne/contains/not_contains、复选框 eq/ne、人员 eq/ne、数字/进度比较、日期比较，以及各类型的 empty/not_empty；单选不支持 contains/not_contains。最多 20 个条件，通过 `and`/`or` 连接。
 - 值形状固定为：URL `valueUrl`、电话 `valuePhoneNumber`、邮箱 `valueEmail` 均为字符串；复选框 `valueCheckbox` 为布尔值；多选 `valueSelects` 为选项 ID 数组；进度 `valueProgress` 为数字（不是对象）。
 - 单向/双向关联没有按记录 ID 过滤：值条件按**被关联记录的标题文本**匹配（内部编码 `filterKeyType=1` + `valueText`），支持 eq/ne/contains/not_contains 和 empty/not_empty；不要传记录 ID 数组。
 - 错误的值键名会被服务端静默忽略并退化为全表，因此工具在本地严格校验值键和 JSON 类型，不把这些情况当作“无匹配”。复选框值比较的 empty/not_empty 在 API 层可用，但网页筛选面板只提供 eq/ne。
