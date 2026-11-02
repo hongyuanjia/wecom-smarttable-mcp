@@ -1,6 +1,6 @@
 # 企业微信智能表格 MCP
 
-本机 stdio MCP，复用个人网页登录态操作企业微信智能表格。支持读取表结构与记录、下载原图与附件、新建智能表格、增删改记录、增删普通列，以及将整份智能表格移入回收站。登录在专用 Chrome 窗口中手动完成，无需配置机器人、企业应用 Secret、管理员授权、数据库或额外模型服务。
+本机 stdio MCP，复用个人网页登录态操作企业微信智能表格。支持读取表结构与记录、下载原图与附件、新建智能表格、增删改记录、增删普通列，以及将整份智能表格移入回收站。0.8.0 起增加能力矩阵、成员通讯录检索、成员单元格 HTTP 写入、视图规范化读取与共享/个人/锁定视图写入，以及字段属性、查找引用（含固定值条件与 8 种统计方式）、单向/双向关联、关联单元格、公式（含展示格式与已验证函数）、视图列设置/删除、子表新建/重命名/删除、URL 单元格和附件/图片上传。登录在专用 Chrome 窗口中手动完成，无需配置机器人、企业应用 Secret、管理员授权、数据库或额外模型服务。
 
 ## 日常使用与登录
 
@@ -88,6 +88,7 @@ tool_timeout_sec = 1200
 | `wecom_query_records` | 按字段条件在服务端筛选，分页返回匹配记录；支持文本、单选及 AND/OR 组合 |
 | `wecom_read_records` | 按子表分页读取记录，可指定字段 ID，返回字段值及图片/附件 `locator` |
 | `wecom_download_asset` | 校验 `locator` 所属记录与字段后下载单个原图或附件；小图片可选同时返回 MCP 图像 |
+| `wecom_upload_asset` | 上传本机文件到图片/附件字段并写入记录，回读文件名、大小、MD5/URL |
 | `wecom_create_table` | 在个人目录新建智能表格，回读并返回链接、默认表结构与初始记录数 |
 | `wecom_update_records` | 按 `record_id` 修改指定字段，并校验提交确认与回读结果 |
 | `wecom_add_records` | 在子表末尾追加记录，回读校验并返回新生成的 `record_id` |
@@ -95,6 +96,20 @@ tool_timeout_sec = 1200
 | `wecom_add_fields` | 在子表末尾新增普通列，支持设置单选/多选选项 |
 | `wecom_delete_fields` | 删除指定普通列及列内数据，保留标题列，并校验字段列表与各视图列顺序 |
 | `wecom_delete_table` | 将指定 `url` 或 `document_id` 的整份智能表格移入回收站；支持 `check_only` 只读查询状态 |
+| `wecom_create_sheet` / `wecom_rename_sheet` / `wecom_delete_sheet` | 在现有文档中新建、重命名或删除子表，并回读核对 |
+| `wecom_capabilities` | 查看每项能力的 `verified`/`local_only`/`unavailable` 状态、前提和逐字段类型支持度；`probe=true` 时只读探测当前文档 |
+| `wecom_search_members` | 通过企业微信通讯录 HTTP 接口按姓名、工号或学号检索，返回 `uid/vid`、姓名、企业和职位；同名候选全部返回，不自动选择 |
+| `wecom_validate_members` | 本地校验成员引用、命名空间、重复项和同名歧义；可对授权候选列表做姓名匹配 |
+| `wecom_read_view` | 读取单个视图的筛选、排序、分组、列顺序、可见列、隐藏列、列宽、冻结列与未知设置摘要 |
+| `wecom_read_view_records` | 按视图共享筛选在本机过滤记录，支持动态“我”、分页和字段选择 |
+| `wecom_update_member_cells` | 通过 HTTP `commitchanges` 写入成员，支持单/多选、替换/追加/移除/明确清空，并按 uid 集合 HTTP 回读核对 |
+| `wecom_create_view` / `wecom_update_view` / `wecom_delete_view` | 通过 HTTP 创建共享视图，或更新名称、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列、看板卡片；支持删除视图 |
+| `wecom_update_fields` | 通过 HTTP `3017` 重命名字段、修改人员多选/添加通知，并回读核对 |
+| `wecom_create_lookup_field` | 通过 HTTP 创建查找引用字段，支持原样引用、计数、去重计数和字段对字段等值条件 |
+| `wecom_create_relation_field` / `wecom_update_relation_cells` | 通过 HTTP 创建单向关联字段，并按目标记录 ID 写入关联单元格、集合回读 |
+| `wecom_create_formula_field` / `wecom_update_formula_field` | 把受限 AST 编码为网页公式 token；不使用 `eval`，配置与计算状态分开报告 |
+| `wecom_plan_changes` | 只读生成配置差异、依赖顺序、影响对象和 blocked 原因，并保存本机计划记录 |
+| `wecom_verify_changes` | 重新读取线上结构与人员单元格，与保存计划或内联 changes 比较，逐项返回 verified/pending/conflict/unknown |
 
 常用指令示例：
 
@@ -144,15 +159,84 @@ tool_timeout_sec = 1200
 修改已有表格的行列时，必须传入 `expected_revision`（取自最近一次结构/记录读取或上一次写入返回的 `revision`）。若返回 `STALE_REVISION`，说明服务端版本已变化且本次请求尚未提交，需重新读取最新内容后再决定是否修改，切勿仅替换版本号直接覆盖。所有写入均按明确传入的 `sheet_id`、`record_id`、`field_id` 定位，不按界面行号或名称猜测。
 
 - **批量限制**：单次可新增/更新/删除 1–100 条记录，或新增/删除 1–20 列；编码后单次请求体上限为 1 MiB，超限会在提交前直接拒绝。
-- **支持写入的单元格类型**：`TEXT`、`NUMBER`、`CHECKBOX`、`DATE_TIME`、`PROGRESS`、`PHONE`、`EMAIL`、`SINGLE_SELECT`、`MULTIPLE_SELECT`。文本/电话/邮箱传字符串，日期传毫秒时间戳，进度支持默认的 `0–1` 数值，单选/多选传结构中已有的选项 ID 数组（不支持按名称匹配或自动新建选项）。
+- **支持写入的单元格类型**：`TEXT`、`NUMBER`、`CHECKBOX`、`DATE_TIME`、`PROGRESS`、`PHONE`、`EMAIL`、`SINGLE_SELECT`、`MULTIPLE_SELECT`。文本/电话/邮箱传字符串，日期传毫秒时间戳，进度支持默认的 `0–1` 数值，单选/多选传结构中已有的选项 ID 数组（不支持按名称匹配或自动新建选项）。人员单元格使用 `wecom_update_member_cells`，单向关联单元格使用 `wecom_update_relation_cells`。
 - **清空单元格**：传入 `null` 清空。企业微信服务端在清空后可能直接省略该单元格字段；工具仅在同时拿到本次明确清空确认及对应版本的记录回读时才判定清空成功，普通读取中出现的 `not_returned` 仍只代表服务端未返回该格，不等同于空值。
-- **新增与删除列**：新增列除支持上述 9 种类型外，还支持创建 `IMAGE`、`ATTACHMENT`、`USER`、`URL` 列；单选/多选列可通过 `options` 传入选项名称数组并返回生成的选项 ID，其余格式配置使用企业微信默认值。暂不支持上传图片/附件、写入人员与 URL 单元格、写入关联或派生值，也不支持创建或删除关联、公式等复杂列。
+- **新增与删除列**：`wecom_add_fields` 支持 `TEXT` 等普通列及 `IMAGE`、`ATTACHMENT`、`USER`、`URL` 列；单选/多选列可通过 `options` 传入选项名称数组并返回生成的选项 ID。查找引用、单向/双向关联和公式字段使用各自的专用工具创建；复杂列删除仍未验证。
 - **标题列与视图顺序**：标题列带 `is_primary` 标记，不可删除。增删普通列后会同步调整并核对各视图中的字段顺序，避免字段定义已删但视图仍残留旧列 ID。
 - **新建表与追加行**：新建表格自带的默认子表、列和初始空记录由企业微信服务端生成，工具按实际回读结果原样返回，不会自动隐藏或清空。追加记录目前仅支持企业微信默认的 11 位 base36 行序格式，遇到其他排序格式会直接报错。
 
 同一 MCP 进程内，针对同一文档的写请求会串行排队：提交前再次核对版本，提交后核对本次请求的确认标识、版本号与回读数据。由于企业微信服务端会合并旧版本命令，`base_rev` 本身不具备跨端原子锁效果，其他客户端仍可能在提交窗口内并发修改；本工具不提供跨客户端原子冲突保护或批量事务回滚。若提交期间或提交后发现版本偏移、数据不符，会返回未完成核验错误。
 
 当返回 `WRITE_RESULT_UNKNOWN` 或 `WRITE_NOT_VERIFIED` 时，说明请求可能已在服务端生效（错误详情中会附带相关的记录/字段/文档 ID）。此时应先重新读取或打开表格核实状态，切勿直接重放新增或删除请求。写请求一旦发出，不会因后续认证过期、网络波动或回读失败而自动重试。新建表格若在回读阶段失败，也会尽量返回已创建的文档链接，避免重复创建。
+
+## 能力矩阵与配置计划（0.8.0）
+
+0.8.0 把“类型存在”和“当前可用”分开声明。先调用 `wecom_capabilities` 查看能力矩阵，不要仅凭官方文档中的参数推断当前账号或后端支持某项配置。
+
+- `verified`：已有真实响应/写入样本或离线契约测试，可按契约使用。
+- `local_only`：本地模型、校验或规划可用；提供方读取语义或写入尚未验证。
+- `unavailable`：缺少授权渠道或验证证据，调用必须保持线上原状。
+
+当前 `verified` 的提供方操作是读取、查询、下载、普通单元格/记录/普通列写入、附件/图片上传、新建表、回收站删除、成员通讯录检索、成员单元格 HTTP 写入（字段通知关闭时）、共享/个人/锁定视图的创建/改名/筛选/分组/排序/隐藏列/列宽/列顺序/冻结列/删除（含动态“我”）、按视图读取记录，以及字段属性、查找引用（固定值与 8 种统计方式）、单向/双向关联、关联单元格、公式（含展示格式）、子表操作和 URL 单元格写入。以下能力仍为 `unavailable` 或只支持已验证子集，对应工具会明确拒绝，不会静默改用固定账号或整对象覆盖：
+
+- 文本字段上的 `COUNTIF`（服务端返回 errorType 4）；
+- `COALESCE`、`PERCENT` 等尚未取得网页端编码的函数；
+- 查找引用中除 `eq`、`contains` 外的运算符；
+- 复杂列删除；
+- 个人视图的跨账号可见性差异（需要至少两个授权账号人工核对）。
+
+### 成员身份与写入
+
+`wecom_search_members` 通过企业微信通讯录 HTTP 接口检索，`query` 可以是姓名、工号或学号（纯数字按工号/学号处理），返回 `namespace: "wecom_uid"`、`id`（uid）、`vid`、姓名、企业和职位。同名候选会全部返回并标记 `ambiguous`，不会自动选择；`wecom_validate_members` 仍可在本机做结构、重复和命名空间校验。
+
+`wecom_update_member_cells` 通过 **HTTP `commitchanges`** 写入，字段必须已关闭“添加人员时通知”，支持单人/多人字段、替换/追加/移除和 `members: []` 明确清空；写入后按 uid 集合做 HTTP 回读核对。成员单元格的真实编码为 `7: [{1: 目标uid}]`、`31: 操作者uid`；只写目标 uid 会被服务端丢弃。成员字段的原始标志已通过开关实验确认：`k1` 为允许多选，`k2` 为添加时通知。不会因写入成员自动邀请、分享或发消息。
+
+### 视图与显示
+
+`wecom_read_view` 会返回列顺序、隐藏列、列宽、分组、排序、筛选条件、个人临时筛选和未识别设置键名。筛选连接符（`1=and`、`2=or`）与运算符（`1=eq`、`3=contains`）已用真实写入验证，其他运算符只保留原始代码。补丁语义固定为：省略属性=保持原值，`filter: null`=显式清除筛选，空 `conditions` 不会被当作清空。新建视图时 `field_order` 可只列可见字段并按该顺序保存；`hidden_fields` 指定要隐藏的字段；列宽可通过 `widths` 设置。
+
+`wecom_create_view` 通过 HTTP `3006` 新建共享视图；`wecom_update_view` 通过 `3009`（改名）、`3021`（筛选）、`3020`（排序）、`3022`（分组）、`3018`（隐藏列）、`3024`（列宽）、`3016`（列顺序）、`3033`（冻结列）局部修改并回读；`wecom_delete_view` 通过 `3007` 删除。看板卡片字段通过隐藏非卡片列控制。`wecom_read_view_records` 读取共享筛选并在本机过滤记录。
+
+`current_viewer`（动态“我”）编码为人员字段筛选的 `k35=true`，可用 `wecom_create_view` / `wecom_update_view` 写入；实际筛选结果仍需至少两个授权账号人工核对，不得用执行者固定账号替代。
+
+### 字段属性、查找引用、关联与公式
+
+`wecom_update_fields` 通过 HTTP `3017` 重命名字段，或修改人员字段的多选/添加通知标志（`k7.k1` / `k7.k2`），并回读核对。标题列可重命名，但保留标题列身份。
+
+`wecom_create_lookup_field` 通过 `3014` + `3017` 创建查找引用字段。已验证“目标表字段 = 本表字段”的等值条件和固定值条件（文本、单选选项），以及原样引用、去重引用、求和、计数、去重计数、平均值、最大值、最小值八种统计方式（`k3=0…7`）；求和/平均/最大/最小只允许数字或进度目标字段。其他运算符会明确拒绝。目标字段不存在、条件字段不属于声明作用域时不会提交。
+
+`wecom_create_relation_field` 创建单向关联（类型 18）或双向关联（类型 21）。双向关联只提交正向字段，`backFieldId` 预生成，服务端在同一提交内自动创建反向字段；跨表提交会返回两条 `respective`，工具按最大 `newRev` 回读。`wecom_update_relation_cells` 按目标记录 ID 写入关联单元格：单向编码 `18:[目标记录ID]`；双向编码 `21:{1:[新增],2:[删除]}`，且 `3013` 的 `c.6=true` 才会触发服务端反向同步，工具会同时回读两侧。目标记录不存在时拒绝，不留下悬空引用。
+
+`wecom_create_formula_field` / `wecom_update_formula_field` 把受限 AST 编码为网页公式 token：文本片段 `{1:1, 2:text}` 与字段引用 `{1:2, 3:field_id}`。已验证字段引用、`IF`、`ISBLANK`、`TODAY`、`COUNT`、`COUNTA`、`COUNTIF`（数值范围）、`DATEDIF`（按天）、`CONCATENATE`、`ROUND`、比较和算术；展示格式支持 `text/number/percent/currency/date/checkbox/email/progress`，可设置小数位、千位符和日期格式。文本字段的 `COUNTIF`、`COALESCE` 和 `PERCENT` 会明确拒绝。工具分别报告“配置已保存”和“抽样计算状态”，配置有效不等于所有行已计算。
+
+### 计划与核对
+
+`wecom_plan_changes` 只读取当前结构与人员单元格，生成本地差异、依赖顺序、影响对象和能力前提，不提交任何修改。相同结构与变更会得到稳定的 `plan_id`，重复执行同一配置应得到空差异。计划默认保存在本机数据目录的 `plans/<plan_id>.json`（权限 `600`，不包含 Cookie/Token）。
+
+```json
+{
+  "url": "<智能表格链接>",
+  "sheet_ids": ["<子表 ID>"],
+  "changes": [
+    {
+      "kind": "view",
+      "action": "update",
+      "sheet_id": "<子表 ID>",
+      "view_id": "<视图 ID>",
+      "patch": { "name": "全部记录", "filter": null, "group": [], "sort": [{ "field_id": "<字段 ID>" }] }
+    }
+  ]
+}
+```
+
+`wecom_verify_changes` 可传 `plan_id` 或内联 `changes`，重新读取线上结构与人员单元格后逐项返回：
+
+- `verified`：已规范化的配置或成员身份与目标一致；
+- `pending`：仍有差异或尚未创建；
+- `conflict`：同名但无法确认一致，或存在冲突；
+- `unknown`：原始配置中出现未解释的设置键，或无法判定同名配置是否一致时使用，不能当作成功。
+
+成员单元格的 `not_returned` 不等同于空值；清空操作在只有 `not_returned` 时会报告待核对，而不是 verified。
 
 ## 删除整份智能表格
 
@@ -200,6 +284,8 @@ npm run check:public
 ```
 
 `check:public` 会扫描受 Git 跟踪的文件、常见凭据格式、本机个人路径，以及解压后的测试夹具与嵌套 JSON（命中时仅报告类别与行号，不回显敏感值）。执行 `npm run check:public -- --history` 可进一步检查完整 Git 历史及提交者邮箱（要求使用 GitHub `noreply` 邮箱）。
+
+0.8.0 的接入前提、能力边界与未验证项见 [docs/接入可行性确认-20261102.md](docs/接入可行性确认-20261102.md)。
 
 如需在本地 `git commit` 前自动运行公开文件检查，可启用仓库自带的 Git 钩子（若已配置自定义 `core.hooksPath`，请先将检查命令合并至现有钩子）：
 
