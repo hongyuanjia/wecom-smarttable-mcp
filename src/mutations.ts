@@ -12,7 +12,7 @@ export const columnTypes = {
 export interface ColumnInput { name: string; type: keyof typeof columnTypes; options?: string[] }
 export interface Mutation { t: number; v: number; c: Raw; r: number; o: number }
 
-export function newId(prefix: 'r' | 'f' | 'o') {
+export function newId(prefix: 'r' | 'f' | 'o' | 'q') {
   const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
   return prefix + Array.from({ length: 5 }, () => alphabet[randomInt(alphabet.length)]).join('');
 }
@@ -26,7 +26,7 @@ export function uniqueIds(ids: string[], label: string) {
 export function encodeCell(field: Field, value: CellValue): Raw {
   const type = field.type_code;
   const invalid = (): never => { throw new WecomError('INVALID_CELL_VALUE', '值不符合字段类型；文本/电话/邮箱用字符串，数字和进度用数字，勾选用布尔值，日期用毫秒时间戳，单选/多选用已有选项 ID 数组，null 表示清空。', { field_id: field.id, field_type: field.type }); };
-  if (![1, 2, 3, 4, 9, 14, 15, 16, 17].includes(type)) throw new WecomError('UNSUPPORTED_WRITE_TYPE', '此字段类型尚未验证单元格写入，不会转换或覆盖其内容。', { field_id: field.id, field_type: field.type });
+  if (![1, 2, 3, 4, 8, 9, 14, 15, 16, 17].includes(type)) throw new WecomError('UNSUPPORTED_WRITE_TYPE', '此字段类型尚未验证单元格写入，不会转换或覆盖其内容。', { field_id: field.id, field_type: field.type });
   let encoded: unknown = value;
   if (value !== null) {
     if ([1, 15, 16].includes(type)) {
@@ -40,6 +40,9 @@ export function encodeCell(field: Field, value: CellValue): Raw {
     } else if (type === 4) {
       if (typeof value !== 'number' || !Number.isSafeInteger(value) || Math.abs(value) > 8.64e15) invalid();
       encoded = String(value);
+    } else if (type === 8) {
+      if (typeof value !== 'string' || !/^https?:\/\//i.test(value)) invalid();
+      encoded = [{ '1': value, '2': value }];
     } else {
       if (!Array.isArray(value) || value.some(id => typeof id !== 'string') || new Set(value).size !== value.length) invalid();
       const selected = value as string[];
@@ -112,6 +115,7 @@ export function valuesMatch(schema: Schema, row: { raw: Raw }, values: Record<st
     if (expected === null) return actual === null || (actual === undefined && confirmedClears?.has(id) === true) || (Array.isArray(actual) && actual.length === 0);
     if (field.type_code === 1) return Array.isArray(actual) && actual.every(p => typeof p.k2 === 'string') && actual.map(p => p.k2).join('') === expected;
     if (field.type_code === 4) return actual === String(expected);
+    if (field.type_code === 8) return Array.isArray(actual) && actual[0]?.k1 === expected && actual[0]?.k2 === expected;
     if (Array.isArray(expected)) return Array.isArray(actual) && actual.length === expected.length && expected.every(id => actual.includes(id));
     return actual === expected;
   });
@@ -178,7 +182,6 @@ export function deleteColumnMutations(sheetId: string, schema: Schema, fieldIds:
     const field = schema.fields.find(f => f.id === id);
     if (!field) throw new WecomError('UNKNOWN_FIELD', '待删除的字段 ID 不存在或不可读取。', { field_id: id });
     if (schema.raw.k9 === id) throw new WecomError('PRIMARY_FIELD', '标题列不能直接删除；请保留标题列。', { field_id: id });
-    if (!Object.values(columnTypes).some(type => type === field.type_code)) throw new WecomError('UNSUPPORTED_WRITE_TYPE', '关联或派生列的删除协议尚未验证，未删除此字段。', { field_id: id });
     const indexes = Object.fromEntries(Object.entries(orders).flatMap(([view, fields]) => {
       const index = fields.indexOf(id);
       if (index < 0) return [];
@@ -187,4 +190,25 @@ export function deleteColumnMutations(sheetId: string, schema: Schema, fieldIds:
     }));
     return mutation(3015, { '1': sheetId, '3': id, '4': { '1': indexes }, '5': null, '8': false });
   });
+}
+
+export interface MemberChange { record_id: string; field_id: string; uids: string[] }
+
+// 网页端成员单元格的真实编码：7 数组放目标成员 uid，31 放当前操作者 uid。
+// 仅写 31 为目标 uid 会被服务端丢弃；这是 HTTP 写入验证出的关键差异。
+export function memberUpdateMutations(sheetId: string, changes: MemberChange[], actor: Raw, recordMode = false) {
+  const seen = new Set<string>();
+  for (const change of changes) {
+    const key = `${change.record_id}/${change.field_id}`;
+    if (seen.has(key)) throw new WecomError('INVALID_ARGUMENT', '同一记录/字段不能在一次成员写入中重复出现。', { record_id: change.record_id, field_id: change.field_id });
+    seen.add(key);
+    if (!Array.isArray(change.uids) || change.uids.some(uid => typeof uid !== 'string' || !uid)) {
+      throw new WecomError('INVALID_ARGUMENT', '成员 uid 列表无效。', { record_id: change.record_id });
+    }
+  }
+  return changes.map(change => mutation(3013, {
+    '1': sheetId, '3': change.record_id,
+    '4': { [change.field_id]: { '7': [...new Set(change.uids)].map(uid => ({ '1': uid })), '30': 7, '31': actor['1'] } },
+    '5': actor, '6': false, '7': recordMode,
+  }));
 }

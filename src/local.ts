@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, rename, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -7,6 +7,7 @@ import { WecomError } from './errors.js';
 export const dataDir = resolve(process.env.WECOM_MCP_DATA_DIR || join(homedir(), '.local', 'share', 'wecom-smarttable-mcp'));
 export const statePath = join(dataDir, 'state.json');
 export const profilePath = join(dataDir, 'profile');
+export const plansPath = join(dataDir, 'plans');
 
 export async function privateDirectory(path = dataDir) {
   await mkdir(path, { recursive: true, mode: 0o700 });
@@ -45,4 +46,25 @@ export function documentReference(input: { url?: string; document_id?: string })
   const doc = documentUrl(input.url || `https://doc.weixin.qq.com/smartsheet/${input.document_id}`);
   if (input.document_id !== undefined && doc.id !== input.document_id) throw new WecomError('DOCUMENT_ID_MISMATCH', 'URL 与 document_id 指向不同文档，尚未操作。');
   return doc;
+}
+
+export async function savePlan(planId: string, value: unknown) {
+  if (!/^[a-f0-9]{64}$/.test(planId)) throw new WecomError('INVALID_ARGUMENT', '计划 ID 格式无效。');
+  await privateDirectory(plansPath);
+  const path = join(plansPath, `${planId}.json`);
+  const temp = join(plansPath, `plan-${randomUUID()}.tmp`);
+  await writeFile(temp, JSON.stringify(value), { flag: 'wx', mode: 0o600 });
+  await rename(temp, path);
+  return path;
+}
+
+export async function loadPlan(planId: string) {
+  if (!/^[a-f0-9]{64}$/.test(planId)) throw new WecomError('INVALID_ARGUMENT', '计划 ID 格式无效。');
+  try {
+    const info = await lstat(join(plansPath, `${planId}.json`));
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error('not a regular file');
+    return JSON.parse(await readFile(join(plansPath, `${planId}.json`), 'utf8'));
+  } catch {
+    throw new WecomError('UNKNOWN_PLAN', '本机没有此计划记录；请先使用 wecom_plan_changes 生成计划。', { plan_id: planId });
+  }
 }

@@ -1,5 +1,6 @@
 import { inflateSync } from 'node:zlib';
 import { requireData, WecomError } from './errors.js';
+import { parseMemberCell } from './members.js';
 
 // 将已实测网页协议的数字键解析集中在此；MCP 入口使用语义化参数。
 type Raw = Record<string, any>;
@@ -145,6 +146,12 @@ export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pi
       const text = (fragments || []).map((v: Raw) => v.k2).join('');
       values[field.id] = { status: cell ? 'present' : 'not_returned', text, ...(includeTextFragments ? { fragments: fragments || [] } : {}),
         text_links: [...new Set<string>(text.match(/https?:\/\/[^\s<>]+/g) || [])].map(url => ({ url, kind: 'text_link', downloadable_as_attachment: false })) };
+    } else if (field.type_code === 7) {
+      // 人员字段同时保留原始值（兼容旧调用）与语义化身份引用；姓名只用于展示。
+      const member = parseMemberCell(cell);
+      const value = cell?.['7'] ?? cell?.k7;
+      values[field.id] = { status: member.status, value: value ?? null, members: member.members,
+        namespace_status: member.namespace_status, ...(member.unresolved.length ? { unresolved_members: member.unresolved } : {}) };
     } else {
       const value = cell?.[`k${field.type_code}`];
       values[field.id] = { status: value !== undefined ? 'present' : cell ? 'unresolved' : 'not_returned', value: value ?? null,
