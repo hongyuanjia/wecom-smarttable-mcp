@@ -264,7 +264,7 @@ tool_timeout_sec = 1200
 - **读取范围**：`wecom_read_records` 始终按当前用户在整张子表中的可访问范围分页，**忽略 URL 中的 `viewId` 及任何视图筛选条件**（视图的筛选配置可在 `wecom_table_structure` 返回值中查看）。条件查询请使用 `wecom_query_records`，仅应用显式传入的条件。
 - **分页与游标**：每页 1–200 条（默认 50），返回总记录数、当前页范围、返回条数、`has_more` 及 `next_cursor`。翻页中途若子表版本变化会返回 `STALE_CURSOR`，需从第一页重读以免遗漏或重复。分页范围不等于界面行号，记录顺序也不保证与界面视图排序一致。
 - **输出大小限制**：单次工具 JSON 响应上限为 1 MiB。默认省略原始富文本片段，确需时设置 `include_text_fragments: true`；仍超限时可调小 `page_size` 或通过 `fields` 仅选择所需字段（字段过滤在本机完成，底层分块接口仍按页拉取整行数据）。
-- **缺失值与派生值**：`not_returned` 表示服务端未下发该单元格（不等同于空值）；`unresolved` 表示未解析出标准字段值。LOOKUP/FORMULA 会解析 `k36`，返回 `present`/`empty`/`pending`/`error`、`result_type`、`members`/`options`、`computed_result`、样本值和错误；空结果与未返回严格区分。
+- **缺失值与派生值**：`not_returned` 表示服务端未下发该单元格（不等同于空值）；`unresolved` 表示未解析出标准字段值。LOOKUP/FORMULA 会解析 `k36`，返回 `present`/`empty`/`pending`/`error`/`parse_error`、`result_type`、`members`/`options`、`computed_result`、样本值和错误；空结果与未返回严格区分。解析失败时附带 `parse_diagnostics`（读取路径、revision、文档/子表/字段、来源 `k36.k1` 或 `k3601`、原始值类型/长度/SHA-256、失败位置、构建标识），默认不保存原始内容；仅当显式设置 `WECOM_MCP_DIAGNOSTICS=1` 时才附带限长脱敏片段，且不含链接、凭据或完整文档内容。畸形 JSON 仍返回 `parse_error`，不会降级为 0、空值或成功。
 - **图片与附件**：仅识别字段类型为 `IMAGE` / `ATTACHMENT` 的文件，正文中的普通 URL 保持为文本，不会当作附件下载。开启 `inline_image: true` 时，4 MiB 以内且格式支持的图片会同时返回 MCP image 载荷，所有下载文件均保存在本机并返回本地路径。
 - **附件类型支持**：直接上传的 `SS_File` 附件支持下载原始文件；微盘（`Wedrive`）附件目前仅支持识别无权限状态（`ATTACHMENT_ACCESS_DENIED`），有权限的微盘文件下载暂未支持，遇到未适配的响应页面会直接报错，不会把预览网页当成附件保存。
 - **流式写盘与校验**：单文件下载上限为 100 MiB，附件与 CDN 图片均采用流式写盘并实时限制字节数，超限、取消或出错时立即中止并清理未完成文件。下载结果返回实际 MIME、字节数、SHA-256、原始文件名及本地保存路径；图片还会在前 512 KiB 文件头内解析并校验宽高尺寸。

@@ -144,7 +144,10 @@ test('双源同时存在时优先 k36.k1 并报告冲突，解析失败不被另
   });
   assert.equal(invalidLegacy.status, 'present');
   assert.equal(invalidLegacy.value, 1);
-  assert.deepEqual(invalidLegacy.alternate_parse_error, { source: 'k3601', parse_error: 'invalid_json' });
+  assert.equal(invalidLegacy.alternate_parse_error.source, 'k3601');
+  assert.equal(invalidLegacy.alternate_parse_error.parse_error, 'invalid_json');
+  assert.equal(invalidLegacy.alternate_parse_error.parse_diagnostics.source, 'k3601');
+  assert.equal(invalidLegacy.alternate_parse_error.parse_diagnostics.raw_content_included, false);
 
   const legacyString = parseDerivedResult({ k30: 19, k3601: JSON.stringify(percentPayload) });
   const legacyObject = parseDerivedResult(legacyCell(percentPayload));

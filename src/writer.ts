@@ -1265,7 +1265,8 @@ export class WecomWriter {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const chunk = await this.client.chunk(target.doc.id, target.sheetId, 0, 50);
       rows = chunk.records.map(record => {
-        const parsed = parseDerivedResult(record.raw.k1?.[fieldId]);
+        const parsed = parseDerivedResult(record.raw.k1?.[fieldId],
+          { read_path: 'write_verification', revision: chunk.revision, field_id: fieldId });
         const items = parsed?.computed_result?.data || [];
         const text = items.map((item: Raw) => item.text).filter((value: unknown): value is string => typeof value === 'string').join('');
         return { record_id: record.id, status: parsed?.status ?? 'missing', text,

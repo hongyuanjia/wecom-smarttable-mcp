@@ -86,5 +86,5 @@ test('构建元数据不包含本机路径、凭据或业务数据', async t => 
 
 test('派生字段标准化契约升级同步到构建指纹版本', () => {
   assert.equal(DERIVED_PARSER_VERSION, '2');
-  assert.equal(OUTPUT_SCHEMA_VERSION, '2');
+  assert.equal(OUTPUT_SCHEMA_VERSION, '3');
 });
