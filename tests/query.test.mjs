@@ -141,3 +141,32 @@ test('损坏的查询 delta/记录映射/单元格结构明确返回 PARSE_ERROR
     assert.throws(() => parseQueryResult(corrupt(change), fixture.sheet_id, 3), e => e.code === 'PARSE_ERROR');
   }
 });
+
+
+test('查询扩展：人员/数字/日期/空值与比较运算符使用真实协议键', () => {
+  const extended = { fields: [
+    { id: 'f_text', type_code: 1, type: 'TEXT' },
+    { id: 'f_user', type_code: 7, type: 'USER' },
+    { id: 'f_number', type_code: 2, type: 'NUMBER' },
+    { id: 'f_date', type_code: 4, type: 'DATE_TIME' },
+    { id: 'f_select', type_code: 17, type: 'SINGLE_SELECT', options: [{ id: 'o_done', name: '完成' }] },
+    { id: 'f_url', type_code: 8, type: 'URL' },
+    { id: 'f_link', type_code: 18, type: 'LINK_RECORDS' },
+  ] };
+  const spec = querySpec(extended, { conjunction: 'and', conditions: [
+    { field_id: 'f_user', operator: 'eq', value: 'uid_example' },
+    { field_id: 'f_number', operator: 'gte', value: 3 },
+    { field_id: 'f_date', operator: 'lt', value: 1794000000000 },
+    { field_id: 'f_text', operator: 'empty' },
+    { field_id: 'f_select', operator: 'ne', value: 'o_done' },
+  ] });
+  assert.deepEqual(spec.conditions[0], { fieldId: 'f_user', filterKeyType: 7, operator: 1, valueUsers: ['uid_example'] });
+  assert.deepEqual(spec.conditions[1], { fieldId: 'f_number', filterKeyType: 2, operator: 6, valueNumber: 3 });
+  assert.deepEqual(spec.conditions[2], { fieldId: 'f_date', filterKeyType: 4, operator: 7, valueDateTime: { type: 1, timestamps: [1794000000000] } });
+  assert.deepEqual(spec.conditions[3], { fieldId: 'f_text', filterKeyType: 1, operator: 9 });
+  assert.deepEqual(spec.conditions[4], { fieldId: 'f_select', filterKeyType: 17, operator: 2, valueSingleSelect: ['o_done'] });
+  assert.throws(() => querySpec(extended, { conjunction: 'and', conditions: [
+    { field_id: 'f_url', operator: 'eq', value: 'https://example.org' }] }), error => error.code === 'UNSUPPORTED_FILTER');
+  assert.throws(() => querySpec(extended, { conjunction: 'and', conditions: [
+    { field_id: 'f_link', operator: 'contains', value: ['r_example'] }] }), error => error.code === 'UNSUPPORTED_FILTER');
+});

@@ -117,6 +117,77 @@ export function assetsFor(cell: Raw | undefined): Asset[] {
   });
 }
 
+const derivedFormatterTypes: Record<number, string> = {
+  1: 'TEXT', 2: 'NUMBER', 3: 'CHECKBOX', 4: 'DATE_TIME', 7: 'USER', 9: 'MULTIPLE_SELECT',
+  14: 'PROGRESS', 16: 'EMAIL', 17: 'SINGLE_SELECT', 26: 'CURRENCY', 28: 'PERCENT',
+};
+
+export function formatterTypeName(code: unknown) {
+  return typeof code === 'number' ? derivedFormatterTypes[code] || `UNKNOWN_${code}` : null;
+}
+
+function derivedItem(item: Raw) {
+  const formatterType = typeof item?.formatterType === 'number' ? item.formatterType : null;
+  const resultType = formatterTypeName(formatterType);
+  const output: Raw = { text: typeof item?.text === 'string' ? item.text : null,
+    formatter_type: formatterType, result_type: resultType };
+  for (const [source, target] of [['number', 'number'], ['formattedNumber', 'formatted_number'],
+    ['timestamp', 'timestamp'], ['decimalPlaces', 'decimal_places']]) {
+    if (typeof item?.[source] === 'number') output[target] = item[source];
+  }
+  if (typeof item?.checked === 'boolean') output.checked = item.checked;
+  if (typeof item?.link === 'string' && item.link) output.link = item.link;
+  if (typeof item?.id === 'string') {
+    if (resultType === 'USER') {
+      output.member = { id: item.id, name: typeof item.name === 'string' ? item.name : null,
+        avatar_url: typeof item.avatarUrl === 'string' ? item.avatarUrl : null, namespace: 'wecom_uid' };
+    } else {
+      output.option_id = item.id;
+    }
+  }
+  if (item?.isError) output.error = { type: typeof item.errorType === 'number' ? item.errorType : null,
+    message: typeof item.errorMessage === 'string' ? item.errorMessage : null,
+    args: Array.isArray(item.errorMessageArgs) ? item.errorMessageArgs : null };
+  return output;
+}
+
+// LOOKUP/FORMULA 的计算结果保存在 k36.k1（JSON 字符串），旧接口也使用 k3601。
+// 不能用 status=unresolved 代替：空结果、计算错误和待计算必须分别报告。
+export function parseDerivedResult(cell: Raw | undefined) {
+  if (!cell) return null;
+  const standard = cell.k36?.k1;
+  if (typeof standard !== 'string') {
+    if (cell.k3601) return { status: 'present', value: null, result_type: null,
+      computed_result: parseJson(cell.k3601, '派生字段结果') };
+    return cell.k36 ? { status: 'pending', value: null, result_type: null, computed_result: null } : null;
+  }
+  let parsed: Raw;
+  try { parsed = JSON.parse(standard); } catch { return { status: 'unresolved', value: null,
+    result_type: null, computed_result: null, parse_error: 'invalid_json' }; }
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.data)) {
+    return { status: 'unresolved', value: null, result_type: null, computed_result: null, parse_error: 'missing_data' };
+  }
+  const items = parsed.data.map(derivedItem);
+  const errors = items.filter(item => item.error);
+  const members = items.filter(item => item.member).map(item => item.member);
+  const options = items.filter(item => item.option_id).map(item => ({ id: item.option_id, text: item.text }));
+  const resultTypes = [...new Set(items.map(item => item.result_type).filter(Boolean))];
+  const resultType = resultTypes.length === 1 ? resultTypes[0] : null;
+  const primary = (item: Raw) => item.number ?? item.timestamp ?? item.checked ?? item.text ?? null;
+  const status = errors.length ? 'error' : items.length ? 'present' : 'empty';
+  return {
+    status,
+    value: items.length === 0 ? [] : items.length === 1 ? primary(items[0]) : items.map(primary),
+    result_type: resultType,
+    ...(resultTypes.length > 1 ? { result_types: resultTypes } : {}),
+    computed_result: { source_type: typeof parsed.sourceType === 'number' ? parsed.sourceType : null,
+      formatter_type: items[0]?.formatter_type ?? null, result_type: resultType, data: items },
+    ...(members.length ? { members } : {}),
+    ...(options.length ? { options } : {}),
+    ...(errors.length ? { errors: errors.map(item => item.error) } : {}),
+  };
+}
+
 export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pick<Chunk, 'start' | 'end'>>, schema: Schema, row: { id: string; raw: Raw }, docId: string, selected: string[], includeTextFragments = false) {
   requireData((chunk.start === undefined) === (chunk.end === undefined), '附件定位器的整表分块范围不完整。');
   const location = chunk.start !== undefined && chunk.end !== undefined
@@ -152,6 +223,9 @@ export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pi
       const value = cell?.['7'] ?? cell?.k7;
       values[field.id] = { status: member.status, value: value ?? null, members: member.members,
         namespace_status: member.namespace_status, ...(member.unresolved.length ? { unresolved_members: member.unresolved } : {}) };
+    } else if ([19, 20].includes(field.type_code)) {
+      // FORMULA/LOOKUP 的 k36 标准单元格：保留返回类型、成员/选项引用及错误/空/待计算状态。
+      values[field.id] = parseDerivedResult(cell) ?? { status: cell ? 'unresolved' : 'not_returned', value: null };
     } else {
       const value = cell?.[`k${field.type_code}`];
       values[field.id] = { status: value !== undefined ? 'present' : cell ? 'unresolved' : 'not_returned', value: value ?? null,
