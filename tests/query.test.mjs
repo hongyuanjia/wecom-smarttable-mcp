@@ -165,8 +165,82 @@ test('查询扩展：人员/数字/日期/空值与比较运算符使用真实�
   assert.deepEqual(spec.conditions[2], { fieldId: 'f_date', filterKeyType: 4, operator: 7, valueDateTime: { type: 1, timestamps: [1794000000000] } });
   assert.deepEqual(spec.conditions[3], { fieldId: 'f_text', filterKeyType: 1, operator: 9 });
   assert.deepEqual(spec.conditions[4], { fieldId: 'f_select', filterKeyType: 17, operator: 2, valueSingleSelect: ['o_done'] });
-  assert.throws(() => querySpec(extended, { conjunction: 'and', conditions: [
-    { field_id: 'f_url', operator: 'eq', value: 'https://example.org' }] }), error => error.code === 'UNSUPPORTED_FILTER');
-  assert.throws(() => querySpec(extended, { conjunction: 'and', conditions: [
-    { field_id: 'f_link', operator: 'contains', value: ['r_example'] }] }), error => error.code === 'UNSUPPORTED_FILTER');
+});
+
+test('查询扩展：URL/电话/邮箱/复选框/多选/进度使用已验证的值键与类型', () => {
+  const typed = { fields: [
+    { id: 'f_url', type_code: 8, type: 'URL' },
+    { id: 'f_phone', type_code: 15, type: 'PHONE' },
+    { id: 'f_email', type_code: 16, type: 'EMAIL' },
+    { id: 'f_check', type_code: 3, type: 'CHECKBOX' },
+    { id: 'f_multi', type_code: 9, type: 'MULTIPLE_SELECT',
+      options: [{ id: 'o_red', name: '红' }, { id: 'o_blue', name: '蓝' }] },
+    { id: 'f_progress', type_code: 14, type: 'PROGRESS' },
+  ] };
+  const spec = querySpec(typed, { conjunction: 'and', conditions: [
+    { field_id: 'f_url', operator: 'eq', value: 'https://example.org/path' },
+    { field_id: 'f_phone', operator: 'contains', value: '138000' },
+    { field_id: 'f_email', operator: 'ne', value: 'alpha@example.com' },
+    { field_id: 'f_check', operator: 'eq', value: true },
+    { field_id: 'f_multi', operator: 'contains', value: ['o_red'] },
+    { field_id: 'f_progress', operator: 'gte', value: 50 },
+  ] });
+  assert.deepEqual(spec.conditions, [
+    { fieldId: 'f_url', filterKeyType: 8, operator: 1, valueUrl: 'https://example.org/path' },
+    { fieldId: 'f_phone', filterKeyType: 15, operator: 3, valuePhoneNumber: '138000' },
+    { fieldId: 'f_email', filterKeyType: 16, operator: 2, valueEmail: 'alpha@example.com' },
+    { fieldId: 'f_check', filterKeyType: 3, operator: 1, valueCheckbox: true },
+    { fieldId: 'f_multi', filterKeyType: 9, operator: 3, valueSelects: ['o_red'] },
+    { fieldId: 'f_progress', filterKeyType: 14, operator: 6, valueProgress: 50 },
+  ]);
+  for (const [condition, code] of [
+    [{ field_id: 'f_url', operator: 'eq', value: true }, 'INVALID_ARGUMENT'],
+    [{ field_id: 'f_url', operator: 'eq', value: ['https://example.org'] }, 'INVALID_ARGUMENT'],
+    [{ field_id: 'f_phone', operator: 'eq', value: 13800000001 }, 'INVALID_ARGUMENT'],
+    [{ field_id: 'f_email', operator: 'eq', value: '' }, 'INVALID_ARGUMENT'],
+    [{ field_id: 'f_check', operator: 'eq', value: 'true' }, 'INVALID_ARGUMENT'],
+    [{ field_id: 'f_check', operator: 'gt', value: true }, 'UNSUPPORTED_FILTER'],
+    [{ field_id: 'f_multi', operator: 'eq', value: 'o_red' }, 'INVALID_ARGUMENT'],
+    [{ field_id: 'f_multi', operator: 'eq', value: [] }, 'INVALID_ARGUMENT'],
+    [{ field_id: 'f_multi', operator: 'eq', value: ['o_unknown'] }, 'UNKNOWN_OPTION'],
+    [{ field_id: 'f_progress', operator: 'gte', value: { number_value: 50 } }, 'INVALID_ARGUMENT'],
+  ]) assert.throws(() => querySpec(typed, { conjunction: 'and', conditions: [condition] }), e => e.code === code);
+
+  assert.deepEqual(querySpec(typed, { conjunction: 'and', conditions: [
+    { field_id: 'f_check', operator: 'empty' },
+    { field_id: 'f_multi', operator: 'not_empty' },
+  ] }).conditions, [
+    { fieldId: 'f_check', filterKeyType: 3, operator: 9 },
+    { fieldId: 'f_multi', filterKeyType: 9, operator: 10 },
+  ]);
+  assert.notEqual(queryFingerprint({ conditions: [{ field_id: 'f_url', operator: 'eq', value: 'https://example.org/a' }] }, ['f_url']),
+    queryFingerprint({ conditions: [{ field_id: 'f_url', operator: 'eq', value: 'https://example.org/b' }] }, ['f_url']));
+});
+
+test('关联与双向关联按关联记录标题文本筛值，空值仍用字段类型码', () => {
+  const linked = { fields: [
+    { id: 'f_link', type_code: 18, type: 'LINK_RECORDS' },
+    { id: 'f_two', type_code: 21, type: 'TWO_WAY_LINK_RECORDS' },
+  ] };
+  const spec = querySpec(linked, { conjunction: 'or', conditions: [
+    { field_id: 'f_link', operator: 'contains', value: '张三' },
+    { field_id: 'f_link', operator: 'ne', value: '张三' },
+    { field_id: 'f_two', operator: 'eq', value: '张三' },
+    { field_id: 'f_two', operator: 'not_contains', value: '李四' },
+    { field_id: 'f_link', operator: 'empty' },
+    { field_id: 'f_two', operator: 'not_empty' },
+  ] });
+  assert.deepEqual(spec.conditions, [
+    { fieldId: 'f_link', filterKeyType: 1, operator: 3, valueText: '张三' },
+    { fieldId: 'f_link', filterKeyType: 1, operator: 2, valueText: '张三' },
+    { fieldId: 'f_two', filterKeyType: 1, operator: 1, valueText: '张三' },
+    { fieldId: 'f_two', filterKeyType: 1, operator: 4, valueText: '李四' },
+    { fieldId: 'f_link', filterKeyType: 18, operator: 9 },
+    { fieldId: 'f_two', filterKeyType: 21, operator: 10 },
+  ]);
+  for (const [condition, code] of [
+    [{ field_id: 'f_link', operator: 'gt', value: '张三' }, 'UNSUPPORTED_FILTER'],
+    [{ field_id: 'f_link', operator: 'contains', value: ['张三'] }, 'INVALID_ARGUMENT'],
+    [{ field_id: 'f_two', operator: 'eq', value: '' }, 'INVALID_ARGUMENT'],
+  ]) assert.throws(() => querySpec(linked, { conjunction: 'and', conditions: [condition] }), e => e.code === code);
 });

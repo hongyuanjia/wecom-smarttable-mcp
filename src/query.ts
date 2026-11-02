@@ -19,6 +19,7 @@ const operatorCodes: Record<QueryOperator, number> = {
 const emptyOperators = new Set<QueryOperator>(['empty', 'not_empty']);
 const textOperators = new Set<QueryOperator>(['eq', 'ne', 'contains', 'not_contains', 'empty', 'not_empty']);
 const selectOperators = new Set<QueryOperator>(['eq', 'ne', 'contains', 'not_contains', 'empty', 'not_empty']);
+const singleSelectOperators = new Set<QueryOperator>(['eq', 'ne', 'empty', 'not_empty']);
 const numberOperators = new Set<QueryOperator>(['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'empty', 'not_empty']);
 const dateOperators = new Set<QueryOperator>(['eq', 'ne', 'gt', 'lt', 'empty', 'not_empty']);
 const userOperators = new Set<QueryOperator>(['eq', 'ne', 'empty', 'not_empty']);
@@ -45,30 +46,26 @@ export function querySpec(schema: Schema, filter: QueryFilter) {
     if (emptyOperators.has(condition.operator)) {
       if (condition.value !== undefined && condition.value !== null) invalid('空值查询不能提供查询值。');
       supported(field.type_code === 1 || field.type_code === 8 || field.type_code === 15 || field.type_code === 16
-        ? textOperators : field.type_code === 17 || field.type_code === 9 ? selectOperators
+        ? textOperators : field.type_code === 17 ? singleSelectOperators : field.type_code === 9 ? selectOperators
           : field.type_code === 2 || field.type_code === 14 ? numberOperators
             : field.type_code === 4 ? dateOperators : field.type_code === 7 ? userOperators
               : field.type_code === 3 ? checkboxOperators : linkOperators);
       return common;
     }
-    if (field.type_code === 1) {
+    const textValue = (key: 'valueText' | 'valueUrl' | 'valuePhoneNumber' | 'valueEmail', message: string) => {
       supported(textOperators);
-      if (typeof condition.value !== 'string' || !condition.value.length || condition.value.length > 4096) {
-        invalid('文本查询值需要 1–4096 字符。');
-      }
+      if (typeof condition.value !== 'string' || !condition.value.length || condition.value.length > 4096) invalid(message);
       if (condition.operator === 'eq' && /[\r\n]/.test(condition.value)) {
         throw new WecomError('UNSUPPORTED_FILTER', '服务端对含换行文本的相等查询与读取值不一致；eq 仅支持单行查询值，请改用 contains。');
       }
-      return { ...common, valueText: condition.value };
-    }
-    if (field.type_code === 8 || field.type_code === 15 || field.type_code === 16) {
-      throw new WecomError('UNSUPPORTED_FILTER', '此文本类字段的值查询编码尚未验证；可先用 empty/not_empty 或按整表读取后在本机筛选。', { field_id: field.id, field_type: field.type });
-    }
+      return { ...common, [key]: condition.value };
+    };
+    if (field.type_code === 1) return textValue('valueText', '文本查询值需要 1–4096 字符。');
+    if (field.type_code === 8) return textValue('valueUrl', 'URL 查询值需要 1–4096 字符的字符串。');
+    if (field.type_code === 15) return textValue('valuePhoneNumber', '电话查询值需要 1–4096 字符的字符串。');
+    if (field.type_code === 16) return textValue('valueEmail', '邮箱查询值需要 1–4096 字符的字符串。');
     if (field.type_code === 17) {
-      supported(selectOperators);
-      if (condition.operator !== 'eq' && condition.operator !== 'ne') {
-        throw new WecomError('UNSUPPORTED_FILTER', '单选字段只支持 eq/ne/empty/not_empty 查询。');
-      }
+      supported(singleSelectOperators);
       if (typeof condition.value !== 'string') invalid('单选查询值必须是选项 ID。');
       if (!field.options?.some(o => o.id === condition.value)) throw new WecomError('UNKNOWN_OPTION', '单选筛选值必须使用结构返回的已有选项 ID。');
       return { ...common, valueSingleSelect: [condition.value] };
@@ -82,6 +79,11 @@ export function querySpec(schema: Schema, filter: QueryFilter) {
         throw new WecomError('UNKNOWN_OPTION', '多选筛选值必须使用结构返回的已有选项 ID。');
       }
       return { ...common, valueSelects: condition.value };
+    }
+    if (field.type_code === 3) {
+      supported(checkboxOperators);
+      if (typeof condition.value !== 'boolean') invalid('复选框查询值必须是布尔值。');
+      return { ...common, valueCheckbox: condition.value };
     }
     if (field.type_code === 7) {
       supported(userOperators);
@@ -97,15 +99,20 @@ export function querySpec(schema: Schema, filter: QueryFilter) {
     if (field.type_code === 14) {
       supported(numberOperators);
       if (typeof condition.value !== 'number' || !Number.isFinite(condition.value)) invalid('进度查询值必须是有限数字。');
-      return { ...common, valueProgress: { number_value: condition.value } };
+      return { ...common, valueProgress: condition.value };
     }
     if (field.type_code === 4) {
       supported(dateOperators);
       if (typeof condition.value !== 'number' || !Number.isSafeInteger(condition.value)) invalid('日期查询值必须是毫秒时间戳。');
       return { ...common, valueDateTime: { type: 1, timestamps: [condition.value] } };
     }
-    if (field.type_code === 3 || field.type_code === 18 || field.type_code === 21) {
-      throw new WecomError('UNSUPPORTED_FILTER', '复选框/关联字段的值查询编码尚未验证；empty/not_empty 可用。', { field_id: field.id, field_type: field.type });
+    if (field.type_code === 18 || field.type_code === 21) {
+      // 真实请求验证：关联/双向关联没有记录 ID 值键；网页端用 filterKeyType=1 + valueText 匹配被关联记录标题。
+      supported(linkOperators);
+      if (typeof condition.value !== 'string' || !condition.value.length || condition.value.length > 4096) {
+        invalid('关联字段查询值必须是被关联记录的标题文本（1–4096 字符）。');
+      }
+      return { fieldId: field.id, filterKeyType: 1, operator: operatorCodes[condition.operator], valueText: condition.value };
     }
     throw new WecomError('UNSUPPORTED_FILTER', '此字段类型尚未验证查询编码。', { field_id: field.id, field_type: field.type });
   }) };
