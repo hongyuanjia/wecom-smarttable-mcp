@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { WecomError } from './errors.js';
-import { assertNoDuplicateFieldIds, compareHiddenFieldSets, compareRequestedWidths, compareWidthMaps, mergeWidths } from './view-semantics.js';
+import { assertNoDuplicateFieldIds, compareHiddenFieldSets, compareRequestedWidths, compareWidthMaps, mergeWidths,
+  validateCreateFieldSelection, validateUpdateFieldOrder } from './view-semantics.js';
 import type { NormalizedField } from './fields.js';
 
 type Raw = Record<string, any>;
@@ -445,9 +446,14 @@ export function planViewWrite(input: {
   } else effective.sort = existing?.sort.map(item => ({ field_id: item.field_id, descending: item.descending })) ?? [];
 
   if (patch.field_order !== undefined) {
-    validateFieldList(patch.field_order, byId, '列顺序', input.fields.length);
-    if (patch.field_order.length !== input.fields.length) throw new WecomError('INVALID_ARGUMENT', '列顺序必须显式包含全部字段，避免遗漏或残留旧列。');
-    effective.columns = patch.field_order;
+    // 更新与新建是两套契约：更新只能重排当前视图列，新建可以选择全表字段的子集。
+    effective.columns = input.action === 'update'
+      ? validateUpdateFieldOrder(patch.field_order, {
+        current_columns: existing!.columns,
+        table_field_ids: input.fields.map(field => field.id),
+        view_id: existing!.id,
+      })
+      : validateCreateFieldSelection(patch.field_order, input.fields.map(field => field.id));
   } else effective.columns = existing?.columns ?? input.fields.map(field => field.id);
   if (patch.hidden_fields !== undefined) {
     effective.hidden_fields = patch.hidden_fields;
@@ -577,12 +583,10 @@ export function buildViewObject(input: {
 }): Raw {
   const typeCode = VIEW_TYPE_CODES[input.type];
   if (!typeCode) throw new WecomError('UNSUPPORTED_VIEW_TYPE', '不支持的视图类型。', { type: input.type });
-  const fieldIds = new Set(input.fields.map(field => field.id));
+  const fieldIds = input.fields.map(field => field.id);
   const hidden = new Set(input.patch.hidden_fields || []);
-  const requested = input.patch.field_order || input.fields.map(field => field.id);
-  if (new Set(requested).size !== requested.length || requested.some(id => !fieldIds.has(id))) {
-    throw new WecomError('UNKNOWN_FIELD', '视图列顺序包含重复或不存在字段。');
-  }
+  // 新建视图使用独立的字段选择契约：允许选择全表字段的子集，但不允许重复或混入其他表字段。
+  const requested = validateCreateFieldSelection(input.patch.field_order || fieldIds, fieldIds);
   const columns = (input.type === 'kanban' && input.patch.kanban
     ? input.patch.kanban.card_fields
     : requested.filter(id => !hidden.has(id)));

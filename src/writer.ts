@@ -11,7 +11,8 @@ import { acknowledgedClears, addColumnMutations, appendRank, columnViewsMatch, d
   type CellValue, type ColumnInput, type MemberChange, type Mutation, type RecordInput } from './mutations.js';
 import { cellsFor, parseDerivedResult } from './protocol.js';
 import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, normalizeView, viewStatisticsMatches, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
-import { assertNoDuplicateFieldIds, compareHiddenFieldSets, compareProtectedWidths, compareRequestedWidths } from './view-semantics.js';
+import { assertNoDuplicateFieldIds, compareHiddenFieldSets, compareProtectedWidths, compareRequestedWidths,
+  validateUpdateFieldOrder } from './view-semantics.js';
 import { normalizeFields } from './fields.js';
 import { formulaFieldMutations, formulaFormatter, formulaFormatterMatches, lookupFieldMutations, relationFieldMutations, type FormulaFormatSpec, type LookupSpec, type RelationSpec } from './field-writer.js';
 import { assertFormulaDefinition, assertProviderFormulaSupport, encodeProviderFormula, type FormulaExpression } from './formulas.js';
@@ -239,11 +240,6 @@ function rawWidths(raw: Raw): Record<string, number> {
     }
   }
   return widths;
-}
-
-function sameStringSet(left: string[], right: string[]) {
-  const a = new Set(left); const b = new Set(right);
-  return a.size === b.size && [...a].every(value => b.has(value));
 }
 
 function sameJson(left: unknown, right: unknown) {
@@ -651,13 +647,16 @@ export class WecomWriter {
     }
     if (patch.field_order !== undefined) {
       const currentOrder = rawColumnOrder(raw);
-      if (!sameStringSet(currentOrder, patch.field_order) || currentOrder.length !== patch.field_order.length) {
-        throw new WecomError('INVALID_ARGUMENT', 'field_order 必须恰好包含当前视图的全部列，不能增删。', { view_id: viewId });
-      }
-      for (const id of patch.field_order) if (!fieldsById.has(id)) throw new WecomError('UNKNOWN_FIELD', '列顺序包含不存在字段。', { field_id: id });
+      // 与计划、核验共用同一契约：只允许重排当前视图全部列，不能增删或用全表字段补齐。
+      const desiredOrder = validateUpdateFieldOrder(patch.field_order, {
+        current_columns: currentOrder,
+        table_field_ids: [...fieldsById.keys()],
+        view_id: viewId,
+      });
+      // 顺序已符合要求时下面的循环不生成 3016 写入，版本不前进。
       let working = [...currentOrder];
-      for (let index = 0; index < patch.field_order.length; index += 1) {
-        const desiredId = patch.field_order[index];
+      for (let index = 0; index < desiredOrder.length; index += 1) {
+        const desiredId = desiredOrder[index];
         if (working[index] === desiredId) continue;
         const source = working.indexOf(desiredId);
         if (source < 0) throw new WecomError('INVALID_ARGUMENT', '列顺序包含不在视图中的字段。', { field_id: desiredId });
