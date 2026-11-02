@@ -50,6 +50,8 @@ npm ci
 npm run build
 ```
 
+构建会同时生成 `dist/build-info.json`：`build_commit`（可用 `WECOM_BUILD_COMMIT` 覆盖）、由入口/协议/视图/写入/计划模块哈希计算的 `build_id`、`output_schema_version` 与 `derived_parser_version`。启动后 `wecom_capabilities` 的 `build` 字段返回该清单，并核对当前进程入口文件哈希；`running.matches_build=false` 表示运行文件与构建清单不一致。
+
 接入后直接向客户端提供链接即可，首次登录同样由 MCP 自动引导。如果需要在终端手动排查，或者客户端不支持表单交互，可执行：
 
 ```sh
@@ -97,7 +99,7 @@ tool_timeout_sec = 1200
 | `wecom_delete_fields` | 删除指定普通列及列内数据，保留标题列，并校验字段列表与各视图列顺序 |
 | `wecom_delete_table` | 将指定 `url` 或 `document_id` 的整份智能表格移入回收站；支持 `check_only` 只读查询状态 |
 | `wecom_create_sheet` / `wecom_rename_sheet` / `wecom_delete_sheet` | 在现有文档中新建、重命名或删除子表，并回读核对 |
-| `wecom_capabilities` | 查看每项能力的 `verified`/`local_only`/`unavailable` 状态、前提和逐字段类型支持度；`probe=true` 时只读探测当前文档 |
+| `wecom_capabilities` | 查看每项能力的 `verified`/`local_only`/`unavailable` 状态、前提和逐字段类型支持度；返回 `build` 构建指纹（提交、模块哈希、输出结构版本、解析器版本及运行入口哈希）；`probe=true` 时只读探测当前文档 |
 | `wecom_search_members` | 通过企业微信通讯录 HTTP 接口按姓名、工号或学号检索，返回 `uid/vid`、姓名、企业和职位；同名候选全部返回，不自动选择 |
 | `wecom_validate_members` | 本地校验成员引用、命名空间、重复项和同名歧义；可对授权候选列表做姓名匹配 |
 | `wecom_read_view` | 读取单个视图的筛选、排序、分组、列顺序、可见列、隐藏列、列宽、冻结列、作用域/可编辑性、配置摘要与未知设置 |
