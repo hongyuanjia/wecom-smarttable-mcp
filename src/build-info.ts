@@ -2,9 +2,10 @@
 // 只暴露提交、版本与文件哈希，不读取环境中的凭据、链接或业务数据。
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { DERIVED_PARSER_VERSION, OUTPUT_SCHEMA_VERSION } from './contract-versions.js';
+import { BUILD_MODULES, DERIVED_PARSER_VERSION, OUTPUT_SCHEMA_VERSION,
+  type BuildModuleName } from './contract-versions.js';
 
-export type BuildModuleName = 'entry' | 'protocol' | 'views' | 'writer' | 'planner';
+export type { BuildModuleName } from './contract-versions.js';
 
 export interface ModuleFingerprint {
   path: string;
@@ -30,11 +31,8 @@ export interface RunningBuild extends BuildManifest {
   };
 }
 
-const MODULE_NAMES: BuildModuleName[] = ['entry', 'protocol', 'views', 'writer', 'planner'];
-const MODULE_FILES: Record<BuildModuleName, string> = {
-  entry: 'server.js', protocol: 'protocol.js', views: 'views.js', writer: 'writer.js', planner: 'planner.js',
-};
-const ENTRY_PATH = `dist/${MODULE_FILES.entry}`;
+const MODULE_NAMES = Object.keys(BUILD_MODULES) as BuildModuleName[];
+const ENTRY_PATH = `dist/${BUILD_MODULES.entry}`;
 const STARTED_AT = new Date().toISOString();
 const manifestUrl = new URL('./build-info.json', import.meta.url);
 const entryUrl = new URL('./server.js', import.meta.url);
@@ -75,7 +73,8 @@ function runningEntryHash(): string | null {
 
 // 未经过 npm run build 时保留契约形状，明确标记 unbuilt，不伪造哈希。
 function unbuilt(): RunningBuild {
-  const modules = Object.fromEntries(MODULE_NAMES.map(name => [name, { path: `dist/${MODULE_FILES[name]}`, sha256: '' }])) as Record<BuildModuleName, ModuleFingerprint>;
+  const modules = Object.fromEntries(MODULE_NAMES.map(name =>
+    [name, { path: `dist/${BUILD_MODULES[name]}`, sha256: '' }])) as Record<BuildModuleName, ModuleFingerprint>;
   return {
     build_commit: 'unknown',
     build_id: 'unbuilt',

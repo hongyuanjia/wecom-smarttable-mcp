@@ -88,7 +88,7 @@ test('真实 stdio MCP 公布三十三个工具，新写入口按能力矩阵拒
     assert.equal(typeof build.derived_parser_version, 'string');
     assert.ok(build.derived_parser_version.length > 0);
     for (const [name, file] of [['entry', 'server.js'], ['protocol', 'protocol.js'], ['views', 'views.js'],
-      ['writer', 'writer.js'], ['planner', 'planner.js']]) {
+      ['view-semantics', 'view-semantics.js'], ['writer', 'writer.js'], ['planner', 'planner.js']]) {
       assert.equal(build.modules[name].path, `dist/${file}`, name);
       assert.match(build.modules[name].sha256, /^[0-9a-f]{64}$/, name);
     }

@@ -3,6 +3,7 @@ import { parseReadCursor, parseQueryCursor } from './cursor.js';
 import { request, type APIRequestContext } from 'playwright';
 import { lstat, readFile } from 'node:fs/promises';
 import { WecomError, requireData } from './errors.js';
+import { contractVersions } from './contract-versions.js';
 import { documentUrl, statePath } from './local.js';
 import { cellsFor, parseChunk, parseJson, presentRecord, selectFields, type Chunk, type Field, type Schema } from './protocol.js';
 import { dependencyCycles, normalizeFields, type NormalizedField } from './fields.js';
@@ -278,7 +279,7 @@ export class WecomClient {
     const offset = (position?.offset || 0) + result.records.length;
     requireData(result.hasMore ? offset < result.total && result.nextCursor !== position?.token : offset === result.total, '筛选查询累计数量与总数不符。');
     const source = { sheetId, raw: result.raw };
-    return { document_id: doc.id, sheet_id: sheetId, revision: first.revision,
+    return { ...contractVersions(), document_id: doc.id, sheet_id: sheetId, revision: first.revision,
       filter_applied: true, filter_execution: 'server', filter, view_filter_applied: false,
       ignored_url_view_id: doc.url.searchParams.get('viewId'), scope: 'matching_records_accessible_to_current_user',
       total_matching_records: result.total, returned_count: result.records.length,
@@ -340,6 +341,7 @@ export class WecomClient {
       { read_path: 'view', revision: firstRevision }));
     const nextOffset = offset + records.length < sorted.length ? offset + records.length : null;
     return {
+      ...contractVersions(),
       document_id: doc.id, sheet_id: sheetId, sheet_name: sheet.name, revision: firstRevision,
       view: { id: view.id, name: view.name, type: view.type, filter: view.filter, sort: view.sort,
         group: view.group, hidden_fields: view.hidden_fields, viewer_dependent: view.viewer_dependent },
@@ -371,7 +373,8 @@ export class WecomClient {
       { read_path: 'whole_table', revision: chunk.revision }));
     const nextOffset = Math.min(chunk.end + 1, chunk.total);
     const hasMore = nextOffset < chunk.total;
-    return { document_id: doc.id, sheet_id: sheetId, sheet_name: chunk.workbook.find(s => s.id === sheetId)?.name,
+    return { ...contractVersions(), document_id: doc.id, sheet_id: sheetId,
+      sheet_name: chunk.workbook.find(s => s.id === sheetId)?.name,
       revision: chunk.revision, scope: 'whole_table_accessible_to_current_user', view_filter_applied: false,
       ignored_url_view_id: doc.url.searchParams.get('viewId'), total_records: chunk.total,
       range: { start_index: chunk.start, end_index_exclusive: chunk.start + records.length }, ordering: 'server_chunk_order_not_ui_row_number', returned_count: records.length,

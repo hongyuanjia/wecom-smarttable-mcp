@@ -7,14 +7,6 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export const BUILD_MODULES = Object.freeze({
-  entry: 'server.js',
-  protocol: 'protocol.js',
-  views: 'views.js',
-  writer: 'writer.js',
-  planner: 'planner.js',
-});
-
 export const BUILD_COMMIT_ENV = 'WECOM_BUILD_COMMIT';
 const MANIFEST_FILE = 'build-info.json';
 let versionImportSequence = 0;
@@ -44,6 +36,7 @@ export async function createBuildInfo({ distDir = resolve('dist'), rootDir = res
   const versions = await import(`${pathToFileURL(join(distDir, 'contract-versions.js')).href}?v=${++versionImportSequence}`);
   const outputSchemaVersion = String(versions.OUTPUT_SCHEMA_VERSION);
   const derivedParserVersion = String(versions.DERIVED_PARSER_VERSION);
+  const BUILD_MODULES = versions.BUILD_MODULES;
 
   const modules = {};
   for (const [name, file] of Object.entries(BUILD_MODULES)) {

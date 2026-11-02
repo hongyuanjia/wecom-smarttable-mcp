@@ -11,8 +11,8 @@ import { acknowledgedClears, addColumnMutations, appendRank, columnViewsMatch, d
   type CellValue, type ColumnInput, type MemberChange, type Mutation, type RecordInput } from './mutations.js';
 import { cellsFor, parseDerivedResult } from './protocol.js';
 import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, normalizeView, viewStatisticsMatches, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
-import { assertNoDuplicateFieldIds, compareHiddenFieldSets, compareProtectedWidths, compareRequestedWidths,
-  validateUpdateFieldOrder } from './view-semantics.js';
+import { extractHiddenFields, validateHiddenFields, compareHiddenFieldSets, compareProtectedWidths, compareRequestedWidths,
+  validateUpdateFieldOrder, validateWidths } from './view-semantics.js';
 import { normalizeFields } from './fields.js';
 import { formulaFieldMutations, formulaFormatter, formulaFormatterMatches, lookupFieldMutations, relationFieldMutations, type FormulaFormatSpec, type LookupSpec, type RelationSpec } from './field-writer.js';
 import { assertFormulaDefinition, assertProviderFormulaSupport, encodeProviderFormula, type FormulaExpression } from './formulas.js';
@@ -217,12 +217,9 @@ function semanticFieldConfigMatches(type: number, rawConfig: Raw | undefined, pa
   return true;
 }
 
-function rawHiddenFields(raw: Raw): string[] {
-  const properties = rawViewProperties(raw);
-  if (!properties || typeof properties.k5 !== 'object' || !properties.k5) return [];
-  return Object.entries(properties.k5)
-    .filter(([, info]) => info && typeof info === 'object' && (info as Raw).k2 === true)
-    .map(([id]) => id);
+function rawHiddenFields(raw: Raw, fieldIds: readonly string[]): string[] {
+  // 与 normalizeView/核验共用同一来源优先级，避免 k1 声明隐藏被宽度标志覆盖。
+  return extractHiddenFields(raw, fieldIds).hidden_fields;
 }
 
 function rawColumnOrder(raw: Raw): string[] {
@@ -240,6 +237,36 @@ function rawWidths(raw: Raw): Record<string, number> {
     }
   }
   return widths;
+}
+
+interface FormulaSample {
+  record_id: string;
+  status: string;
+  text: string;
+  result_type: string | null;
+  error: Raw | null;
+  parse_error: string | null;
+}
+
+// 写后计算核对：解析失败与待计算必须分开计数，逐条 samples 保留各自状态。
+export function summarizeFormulaSamples(rows: readonly FormulaSample[]) {
+  const computed = rows.filter(row => row.status === 'present').length;
+  const empty = rows.filter(row => row.status === 'empty').length;
+  const parseErrors = rows.filter(row => row.status === 'parse_error').length;
+  const errors = rows.filter(row => row.status === 'error').length;
+  const pending = rows.filter(row => ['pending', 'missing', 'unresolved'].includes(row.status)).length;
+  const status = errors ? 'errors' : parseErrors ? 'parse_errors' : computed ? 'computed' : empty ? 'empty' : 'pending';
+  const calculationStatus = errors ? 'error' : parseErrors ? 'parse_error' : computed ? 'verified' : empty ? 'empty' : 'pending';
+  return {
+    status, calculation_status: calculationStatus, sampled: rows.length,
+    computed, empty, pending, parse_errors: parseErrors, errors,
+    result_type: rows.find(row => row.result_type)?.result_type ?? null,
+    samples: rows.slice(0, 5),
+    ...(errors ? { error_details: rows.filter(row => row.error)
+      .map(row => ({ record_id: row.record_id, ...row.error })) } : {}),
+    ...(parseErrors ? { parse_error_details: rows.filter(row => row.parse_error)
+      .map(row => ({ record_id: row.record_id, parse_error: row.parse_error })) } : {}),
+  };
 }
 
 function sameJson(left: unknown, right: unknown) {
@@ -535,6 +562,7 @@ export class WecomWriter {
     if (patch.kanban && patch.group !== undefined) throw new WecomError('INVALID_ARGUMENT', '看板分组请使用 kanban.group_field_id，不要同时传 group。');
     const normalizedFields = normalizeFields(target.schema, [target.sheetId]);
     const fieldsById = new Map(normalizedFields.map(field => [field.id, field]));
+    const fieldIds = [...fieldsById.keys()];
     const filterPatch = patch.filter;
     const properties = rawViewProperties(raw);
     const beforeWidths = rawWidths(raw);
@@ -595,10 +623,8 @@ export class WecomWriter {
       hiddenPatch = columns.filter(id => !card.has(id));
     }
     if (hiddenPatch !== undefined) {
-      assertNoDuplicateFieldIds(hiddenPatch, '隐藏列');
-      for (const id of hiddenPatch) if (!fieldsById.has(id)) throw new WecomError('UNKNOWN_FIELD', '隐藏列包含不存在字段。', { field_id: id });
-      const desired = new Set(hiddenPatch);
-      const current = new Set(rawHiddenFields(raw));
+      const desired = new Set(validateHiddenFields(hiddenPatch, fieldIds));
+      const current = new Set(rawHiddenFields(raw, fieldIds));
       const toHide = [...desired].filter(id => !current.has(id));
       const toShow = [...current].filter(id => !desired.has(id));
       const commands: Mutation[] = [];
@@ -606,23 +632,25 @@ export class WecomWriter {
       if (toShow.length) commands.push(mutation(3018, { '1': sheetId, '2': viewId, '3': toShow, '4': { '1': false } }));
       if (commands.length) changes.push({ commands, verify: schema => {
         const actual = currentView(schema);
-        return Boolean(actual && compareHiddenFieldSets(rawHiddenFields(actual), [...desired]).length === 0);
+        return Boolean(actual && compareHiddenFieldSets(rawHiddenFields(actual, fieldIds), [...desired]).length === 0);
       } });
     }
     if (patch.widths !== undefined) {
+      const widths = patch.widths;
+      validateWidths(widths, fieldIds);
       const commands: Mutation[] = [];
-      for (const [id, width] of Object.entries(patch.widths)) {
-        if (!fieldsById.has(id)) throw new WecomError('UNKNOWN_FIELD', '列宽包含不存在字段。', { field_id: id });
+      for (const [id, width] of Object.entries(widths)) {
+        // 已是当前原始宽度就不再提交 3024；全部相同则本次操作无写入、版本不前进。
+        if (beforeWidths[id] === width) continue;
         commands.push(mutation(3024, { '1': sheetId, '2': viewId, '3': id, '4': { '1': width } }));
       }
-      const requested = Object.keys(patch.widths);
       if (commands.length) changes.push({ commands, verify: schema => {
         const actual = currentView(schema);
         if (!actual) return false;
         const afterWidths = rawWidths(actual);
         // 分别核查“请求已生效”和“未请求键未受损”；未请求键不能被局部写入重置。
-        return compareRequestedWidths(afterWidths, patch.widths!).length === 0
-          && compareProtectedWidths(beforeWidths, afterWidths, requested).length === 0;
+        return compareRequestedWidths(afterWidths, widths).length === 0
+          && compareProtectedWidths(beforeWidths, afterWidths, Object.keys(widths)).length === 0;
       } });
     }
     if (patch.statistics !== undefined) {
@@ -1259,8 +1287,8 @@ export class WecomWriter {
   }
 
   private async formulaCalculation(target: Target, fieldId: string) {
-    let rows: Raw[] = [];
-    let counts = { computed: 0, empty: 0, pending: 0, errors: 0 };
+    let rows: FormulaSample[] = [];
+    let counts = summarizeFormulaSamples(rows);
     // 计算可能异步完成；有限次数等待，超时保持 pending，不把“未返回”当成空值。
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const chunk = await this.client.chunk(target.doc.id, target.sheetId, 0, 50);
@@ -1270,26 +1298,14 @@ export class WecomWriter {
         const items = parsed?.computed_result?.data || [];
         const text = items.map((item: Raw) => item.text).filter((value: unknown): value is string => typeof value === 'string').join('');
         return { record_id: record.id, status: parsed?.status ?? 'missing', text,
-          result_type: parsed?.result_type ?? null, error: (parsed as Raw)?.errors?.[0] ?? null };
+          result_type: parsed?.result_type ?? null, error: (parsed as Raw)?.errors?.[0] ?? null,
+          parse_error: parsed?.status === 'parse_error' ? (parsed as Raw).parse_error ?? 'unknown' : null };
       });
-      counts = {
-        computed: rows.filter(row => row.status === 'present').length,
-        empty: rows.filter(row => row.status === 'empty').length,
-        pending: rows.filter(row => ['pending', 'missing', 'unresolved', 'parse_error'].includes(row.status)).length,
-        errors: rows.filter(row => row.status === 'error').length,
-      };
-      if (counts.errors || counts.computed || counts.empty) break;
+      counts = summarizeFormulaSamples(rows);
+      if (counts.errors || counts.parse_errors || counts.computed || counts.empty) break;
       if (attempt < 3) await setTimeout(500, undefined, { signal: this.signal });
     }
-    const status = counts.errors ? 'errors' : counts.computed ? 'computed' : counts.empty ? 'empty' : 'pending';
-    const calculationStatus = counts.errors ? 'error' : counts.computed ? 'verified' : counts.empty ? 'empty' : 'pending';
-    const resultType = rows.find(row => row.result_type)?.result_type ?? null;
-    return {
-      status, config_status: 'saved', calculation_status: calculationStatus,
-      sampled: rows.length, computed: counts.computed, empty: counts.empty, pending: counts.pending, errors: counts.errors,
-      result_type: resultType, samples: rows.slice(0, 5),
-      ...(counts.errors ? { error_details: rows.filter(row => row.error).map(row => ({ record_id: row.record_id, ...row.error })) } : {}),
-    };
+    return { ...counts, config_status: 'saved' };
   }
 
   async addFields(url: string, sheetId: string, revision: number, columns: ColumnInput[], planId?: string) {

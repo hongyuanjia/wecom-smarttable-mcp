@@ -88,6 +88,16 @@ test('整表读取在字段结果中记录读取路径、revision、文档/子�
   assert.equal(view.parse_diagnostics.revision, 546);
 });
 
+test('诊断中的 formatter 上下文与结果字段使用同一数字归一化', () => {
+  const snake = parseDerivedResult({ k30: 19, k3601: { formatter_type: '14' } });
+  assert.equal(snake.parse_diagnostics.failure, 'missing_data');
+  assert.equal(snake.parse_diagnostics.formatter_type, 14);
+  const camel = parseDerivedResult({ k30: 19, k3601: { formatterType: '28' } });
+  assert.equal(camel.parse_diagnostics.formatter_type, 28);
+  const nonNumeric = parseDerivedResult({ k30: 19, k3601: { formatter_type: 'percent' } });
+  assert.equal(nonNumeric.parse_diagnostics.formatter_type, null);
+});
+
 test('旧接口 k3601 的字符串与对象失败也分别记录来源和原始类型', () => {
   const legacyString = parseDerivedResult({ k30: 19, k3601: '{' });
   assert.equal(legacyString.parse_diagnostics.source, 'k3601');
