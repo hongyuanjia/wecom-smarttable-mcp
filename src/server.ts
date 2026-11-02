@@ -73,7 +73,7 @@ const viewPatch = z.strictObject({
   field_order: z.array(id).min(1).max(500).optional().describe('必须显式包含全部字段，避免遗漏或残留旧列。'),
   widths: z.record(id, z.number().int().min(1).max(1000)).optional(),
   frozen_field_count: z.number().int().min(0).max(500).nullable().optional(),
-  statistics: z.boolean().nullable().optional(),
+  statistics: z.boolean().nullable().optional().describe('字段统计启用标志（视图 k1.k10），通过 HTTP 3025 写入并回读；省略=保持，null 视为 false（关闭）。该标志不控制底部统计行的显隐，逐列统计未开放。'),
   kanban: z.strictObject({ group_field_id: id, card_fields: z.array(id).max(20), retains_empty_group: z.literal(true) }).optional(),
 });
 const lookupSide = z.strictObject({ scope: z.enum(['source', 'target']), field_id: id });
@@ -377,7 +377,7 @@ serveStdio(() => {
     inputSchema: z.strictObject({ ...tableChange, view: viewPatch.refine(value => Boolean(value.name), '新建视图需要 name。') }) },
     (args, ctx) => run('wecom_create_view', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
       .createView(args.url, args.sheet_id, args.expected_revision, args.view, args.plan_id) }), true));
-  server.registerTool('wecom_update_view', { description: '按 view_id 通过 HTTP 修改视图名称、scope（shared/locked/personal）、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列和看板卡片字段；省略的属性保持原值，filter:null 才表示清除筛选。',
+  server.registerTool('wecom_update_view', { description: '按 view_id 通过 HTTP 修改视图名称、scope（shared/locked/personal）、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列、字段统计标志（statistics，3025 写入 k1.k10）和看板卡片字段；省略的属性保持原值，filter:null 才表示清除筛选，statistics:null 视为关闭。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, view_id: id, patch: viewPatch }) },
     (args, ctx) => run('wecom_update_view', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
