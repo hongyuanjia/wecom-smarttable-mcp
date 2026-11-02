@@ -1,6 +1,6 @@
 # 企业微信智能表格 MCP
 
-本机 stdio MCP，复用个人网页登录态操作企业微信智能表格。支持读取表结构与记录、下载原图与附件、新建智能表格、增删改记录、增删普通列，以及将整份智能表格移入回收站。0.8.0 起增加能力矩阵、成员通讯录检索、成员单元格 HTTP 写入、视图规范化读取与共享/个人/锁定视图写入，以及字段属性、查找引用（含固定值条件与 8 种统计方式）、单向/双向关联、关联单元格、公式（含展示格式与已验证函数）、视图列设置/删除、子表新建/重命名/删除、URL 单元格和附件/图片上传。登录在专用 Chrome 窗口中手动完成，无需配置机器人、企业应用 Secret、管理员授权、数据库或额外模型服务。
+本机 stdio MCP，复用个人网页登录态操作企业微信智能表格。支持读取表结构与记录、下载原图与附件、新建智能表格、增删改记录、增删普通列，以及将整份智能表格移入回收站。0.9.0 起增加能力矩阵、成员通讯录检索、成员单元格 HTTP 写入、视图规范化读取与共享/个人/锁定视图写入、视图级配置摘要校验，以及字段属性、查找引用（条件/固定值/沿关联字段、8 种统计方式与歧义诊断）、单向/双向关联、关联单元格、公式（展示格式、已验证函数、计算结果读取）、视图列设置/删除、子表新建/重命名/删除、URL 单元格、附件/图片上传和本机执行日志。登录在专用 Chrome 窗口中手动完成，无需配置机器人、企业应用 Secret、管理员授权、数据库或额外模型服务。
 
 ## 日常使用与登录
 
@@ -100,14 +100,15 @@ tool_timeout_sec = 1200
 | `wecom_capabilities` | 查看每项能力的 `verified`/`local_only`/`unavailable` 状态、前提和逐字段类型支持度；`probe=true` 时只读探测当前文档 |
 | `wecom_search_members` | 通过企业微信通讯录 HTTP 接口按姓名、工号或学号检索，返回 `uid/vid`、姓名、企业和职位；同名候选全部返回，不自动选择 |
 | `wecom_validate_members` | 本地校验成员引用、命名空间、重复项和同名歧义；可对授权候选列表做姓名匹配 |
-| `wecom_read_view` | 读取单个视图的筛选、排序、分组、列顺序、可见列、隐藏列、列宽、冻结列与未知设置摘要 |
+| `wecom_read_view` | 读取单个视图的筛选、排序、分组、列顺序、可见列、隐藏列、列宽、冻结列、作用域/可编辑性、配置摘要与未知设置 |
 | `wecom_read_view_records` | 按视图共享筛选在本机过滤记录，支持动态“我”、分页和字段选择 |
 | `wecom_update_member_cells` | 通过 HTTP `commitchanges` 写入成员，支持单/多选、替换/追加/移除/明确清空，并按 uid 集合 HTTP 回读核对 |
-| `wecom_create_view` / `wecom_update_view` / `wecom_delete_view` | 通过 HTTP 创建共享视图，或更新名称、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列、看板卡片；支持删除视图 |
+| `wecom_create_view` / `wecom_update_view` / `wecom_delete_view` | 通过 HTTP 创建共享/锁定/个人视图，或更新名称、作用域、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列、看板卡片；支持 `config_digest` 并发校验和删除视图 |
 | `wecom_update_fields` | 通过 HTTP `3017` 重命名字段、修改人员多选/添加通知，并回读核对 |
-| `wecom_create_lookup_field` | 通过 HTTP 创建查找引用字段，支持原样引用、计数、去重计数和字段对字段等值条件 |
+| `wecom_create_lookup_field` | 通过 HTTP 创建查找引用字段，支持条件匹配/固定值/沿关联字段、8 种统计方式和零匹配/多匹配诊断 |
 | `wecom_create_relation_field` / `wecom_update_relation_cells` | 通过 HTTP 创建单向关联字段，并按目标记录 ID 写入关联单元格、集合回读 |
-| `wecom_create_formula_field` / `wecom_update_formula_field` | 把受限 AST 编码为网页公式 token；不使用 `eval`，配置与计算状态分开报告 |
+| `wecom_create_formula_field` / `wecom_update_formula_field` | 把受限 AST 编码为网页公式 token；读取 k36 结果与错误/空/待计算状态，不使用 `eval` |
+| `wecom_list_executions` | 读取本机执行日志：execution_id、时间、文档/子表、操作、版本和 verified/not_verified |
 | `wecom_plan_changes` | 只读生成配置差异、依赖顺序、影响对象和 blocked 原因，并保存本机计划记录 |
 | `wecom_verify_changes` | 重新读取线上结构与人员单元格，与保存计划或内联 changes 比较，逐项返回 verified/pending/conflict/unknown |
 
@@ -147,7 +148,8 @@ tool_timeout_sec = 1200
 }
 ```
 
-- 支持 `TEXT` 的 `eq`（服务端相等，仅单行查询值）和 `contains`（包含）、`SINGLE_SELECT` 的 `eq`（传已有选项 ID）；最多 20 个条件，通过 `and`/`or` 连接。其他字段和运算符尚未验证，会明确报错。
+- 支持 TEXT 的 eq/ne/contains/not_contains、单选/多选的 eq/ne/contains/not_contains、人员 eq/ne、数字/进度/日期比较、复选框与关联的 empty/not_empty；最多 20 个条件，通过 `and`/`or` 连接。
+- URL、电话、邮箱、复选框值比较和关联记录值比较尚未取得可用编码，会明确拒绝而不是返回全表；这些字段仍可用 empty/not_empty 或整表读取后在本机筛选。
 - 含换行查询值的文本 `eq` 在真实接口中出现与读取值不一致的结果，当前拒绝此用法；可使用单行关键词 `contains`。
 - 返回 `total_matching_records`、`records`、`has_more`、`next_cursor`。每页默认 50 条，最多 200 条；翻页时继续传入同一条件并原样传回游标，`fields` 可省略以沿用上一页，显式传入时必须保持一致。版本变化返回 `STALE_CURSOR`，需从第一页重查；损坏或不匹配的游标返回 `INVALID_CURSOR`。
 - 查询不叠加 URL `viewId`、个人或保存的视图筛选。接口异常会明确失败，不自动改成全表扫描。
@@ -169,9 +171,9 @@ tool_timeout_sec = 1200
 
 当返回 `WRITE_RESULT_UNKNOWN` 或 `WRITE_NOT_VERIFIED` 时，说明请求可能已在服务端生效（错误详情中会附带相关的记录/字段/文档 ID）。此时应先重新读取或打开表格核实状态，切勿直接重放新增或删除请求。写请求一旦发出，不会因后续认证过期、网络波动或回读失败而自动重试。新建表格若在回读阶段失败，也会尽量返回已创建的文档链接，避免重复创建。
 
-## 能力矩阵与配置计划（0.8.0）
+## 能力矩阵与配置计划（0.9.0）
 
-0.8.0 把“类型存在”和“当前可用”分开声明。先调用 `wecom_capabilities` 查看能力矩阵，不要仅凭官方文档中的参数推断当前账号或后端支持某项配置。
+0.9.0 把“类型存在”和“当前可用”分开声明。先调用 `wecom_capabilities` 查看能力矩阵，不要仅凭官方文档中的参数推断当前账号或后端支持某项配置。
 
 - `verified`：已有真实响应/写入样本或离线契约测试，可按契约使用。
 - `local_only`：本地模型、校验或规划可用；提供方读取语义或写入尚未验证。
@@ -181,9 +183,11 @@ tool_timeout_sec = 1200
 
 - 文本字段上的 `COUNTIF`（服务端返回 errorType 4）；
 - `COALESCE`、`PERCENT` 等尚未取得网页端编码的函数；
-- 查找引用中除 `eq`、`contains` 外的运算符；
+- 查找引用条件中除 `eq`、`contains` 外的运算符；
 - 复杂列删除；
-- 个人视图的跨账号可见性差异（需要至少两个授权账号人工核对）。
+- 个人视图的跨账号可见性差异（需要至少两个授权账号人工核对）；
+- 视图统计行切换（只读取 `k10`，写入会拒绝）；
+- URL/电话/邮箱/复选框/关联记录的值比较查询。
 
 ### 成员身份与写入
 
@@ -193,9 +197,9 @@ tool_timeout_sec = 1200
 
 ### 视图与显示
 
-`wecom_read_view` 会返回列顺序、隐藏列、列宽、分组、排序、筛选条件、个人临时筛选和未识别设置键名。筛选连接符（`1=and`、`2=or`）与运算符（`1=eq`、`3=contains`）已用真实写入验证，其他运算符只保留原始代码。补丁语义固定为：省略属性=保持原值，`filter: null`=显式清除筛选，空 `conditions` 不会被当作清空。新建视图时 `field_order` 可只列可见字段并按该顺序保存；`hidden_fields` 指定要隐藏的字段；列宽可通过 `widths` 设置。
+`wecom_read_view` 会返回列顺序、隐藏列、列宽、分组、排序、筛选条件、个人临时筛选、共享/锁定/个人作用域、可编辑性、`config_digest` 和未识别设置键名。个人视图仅 owner 可编辑，锁定视图不可编辑。更新视图时可传 `expected_view_digest`（即 `config_digest`）做视图级并发校验。筛选连接符（`1=and`、`2=or`）与运算符（`1=eq`、`3=contains`）已用真实写入验证，其他运算符只保留原始代码。补丁语义固定为：省略属性=保持原值，`filter: null`=显式清除筛选，空 `conditions` 不会被当作清空。新建视图时 `field_order` 可只列可见字段并按该顺序保存；`hidden_fields` 指定要隐藏的字段；列宽可通过 `widths` 设置。
 
-`wecom_create_view` 通过 HTTP `3006` 新建共享视图；`wecom_update_view` 通过 `3009`（改名）、`3021`（筛选）、`3020`（排序）、`3022`（分组）、`3018`（隐藏列）、`3024`（列宽）、`3016`（列顺序）、`3033`（冻结列）局部修改并回读；`wecom_delete_view` 通过 `3007` 删除。看板卡片字段通过隐藏非卡片列控制。`wecom_read_view_records` 读取共享筛选并在本机过滤记录。
+`wecom_create_view` 通过 HTTP `3006` 新建共享/锁定/个人视图；`wecom_update_view` 通过 `3009`（改名/作用域）、`3021`（筛选）、`3020`（排序）、`3022`（分组）、`3018`（隐藏列）、`3024`（列宽）、`3016`（列顺序）、`3033`（冻结列）局部修改并回读；多步更新中途失败返回 `PARTIAL_APPLY`。统计行只读取，未找到可靠写入路径时拒绝。`wecom_delete_view` 通过 `3007` 删除。看板卡片字段通过隐藏非卡片列控制。`wecom_read_view_records` 读取共享筛选并在本机过滤记录。
 
 `current_viewer`（动态“我”）编码为人员字段筛选的 `k35=true`，可用 `wecom_create_view` / `wecom_update_view` 写入；实际筛选结果仍需至少两个授权账号人工核对，不得用执行者固定账号替代。
 
@@ -203,11 +207,11 @@ tool_timeout_sec = 1200
 
 `wecom_update_fields` 通过 HTTP `3017` 重命名字段，或修改人员字段的多选/添加通知标志（`k7.k1` / `k7.k2`），并回读核对。标题列可重命名，但保留标题列身份。
 
-`wecom_create_lookup_field` 通过 `3014` + `3017` 创建查找引用字段。已验证“目标表字段 = 本表字段”的等值条件和固定值条件（文本、单选选项），以及原样引用、去重引用、求和、计数、去重计数、平均值、最大值、最小值八种统计方式（`k3=0…7`）；求和/平均/最大/最小只允许数字或进度目标字段。其他运算符会明确拒绝。目标字段不存在、条件字段不属于声明作用域时不会提交。
+`wecom_create_lookup_field` 通过 `3014` + `3017` 创建查找引用字段。支持条件匹配（字段对字段、文本/单选固定值）和沿关联字段引用（`k1=关联字段,k4=0`），以及原样引用、去重引用、求和、计数、去重计数、平均值、最大值、最小值八种统计方式（`k3=0…7`）；求和/平均/最大/最小只允许数字或进度目标字段。创建后返回零匹配、多匹配和关联空值诊断；`fail_on_ambiguous=true` 时匹配键多匹配返回 `LOOKUP_AMBIGUOUS`。目标字段不存在、条件字段不属于声明作用域时不会提交。
 
 `wecom_create_relation_field` 创建单向关联（类型 18）或双向关联（类型 21）。双向关联只提交正向字段，`backFieldId` 预生成，服务端在同一提交内自动创建反向字段；跨表提交会返回两条 `respective`，工具按最大 `newRev` 回读。`wecom_update_relation_cells` 按目标记录 ID 写入关联单元格：单向编码 `18:[目标记录ID]`；双向编码 `21:{1:[新增],2:[删除]}`，且 `3013` 的 `c.6=true` 才会触发服务端反向同步，工具会同时回读两侧。目标记录不存在时拒绝，不留下悬空引用。
 
-`wecom_create_formula_field` / `wecom_update_formula_field` 把受限 AST 编码为网页公式 token：文本片段 `{1:1, 2:text}` 与字段引用 `{1:2, 3:field_id}`。已验证字段引用、`IF`、`ISBLANK`、`TODAY`、`COUNT`、`COUNTA`、`COUNTIF`（数值范围）、`DATEDIF`（按天）、`CONCATENATE`、`ROUND`、比较和算术；展示格式支持 `text/number/percent/currency/date/checkbox/email/progress`，可设置小数位、千位符和日期格式。文本字段的 `COUNTIF`、`COALESCE` 和 `PERCENT` 会明确拒绝。工具分别报告“配置已保存”和“抽样计算状态”，配置有效不等于所有行已计算。
+`wecom_create_formula_field` / `wecom_update_formula_field` 把受限 AST 编码为网页公式 token：文本片段 `{1:1, 2:text}` 与字段引用 `{1:2, 3:field_id}`。已验证字段引用、`IF`、`ISBLANK`、`TODAY`、`COUNT`、`COUNTA`、`COUNTIF`（数值范围）、`DATEDIF`（按天）、`CONCATENATE`、`ROUND`、比较和算术；展示格式支持 `text/number/percent/currency/date/checkbox/email/progress`。写入后读取 `k36`，区分 computed/empty/pending/error，有限次数等待并返回样本结果、返回类型和错误；文本字段的 `COUNTIF`、`COALESCE` 和 `PERCENT` 会明确拒绝。
 
 ### 计划与核对
 
@@ -252,7 +256,7 @@ tool_timeout_sec = 1200
 - **读取范围**：`wecom_read_records` 始终按当前用户在整张子表中的可访问范围分页，**忽略 URL 中的 `viewId` 及任何视图筛选条件**（视图的筛选配置可在 `wecom_table_structure` 返回值中查看）。条件查询请使用 `wecom_query_records`，仅应用显式传入的条件。
 - **分页与游标**：每页 1–200 条（默认 50），返回总记录数、当前页范围、返回条数、`has_more` 及 `next_cursor`。翻页中途若子表版本变化会返回 `STALE_CURSOR`，需从第一页重读以免遗漏或重复。分页范围不等于界面行号，记录顺序也不保证与界面视图排序一致。
 - **输出大小限制**：单次工具 JSON 响应上限为 1 MiB。默认省略原始富文本片段，确需时设置 `include_text_fragments: true`；仍超限时可调小 `page_size` 或通过 `fields` 仅选择所需字段（字段过滤在本机完成，底层分块接口仍按页拉取整行数据）。
-- **缺失值与派生值**：`not_returned` 表示服务端未下发该单元格（不等同于空值）；`unresolved` 表示未解析出标准字段值（不等同于空值，也不代表服务端仍在计算；部分派生字段可能同时附带 `computed_result`）。
+- **缺失值与派生值**：`not_returned` 表示服务端未下发该单元格（不等同于空值）；`unresolved` 表示未解析出标准字段值。LOOKUP/FORMULA 会解析 `k36`，返回 `present`/`empty`/`pending`/`error`、`result_type`、`members`/`options`、`computed_result`、样本值和错误；空结果与未返回严格区分。
 - **图片与附件**：仅识别字段类型为 `IMAGE` / `ATTACHMENT` 的文件，正文中的普通 URL 保持为文本，不会当作附件下载。开启 `inline_image: true` 时，4 MiB 以内且格式支持的图片会同时返回 MCP image 载荷，所有下载文件均保存在本机并返回本地路径。
 - **附件类型支持**：直接上传的 `SS_File` 附件支持下载原始文件；微盘（`Wedrive`）附件目前仅支持识别无权限状态（`ATTACHMENT_ACCESS_DENIED`），有权限的微盘文件下载暂未支持，遇到未适配的响应页面会直接报错，不会把预览网页当成附件保存。
 - **流式写盘与校验**：单文件下载上限为 100 MiB，附件与 CDN 图片均采用流式写盘并实时限制字节数，超限、取消或出错时立即中止并清理未完成文件。下载结果返回实际 MIME、字节数、SHA-256、原始文件名及本地保存路径；图片还会在前 512 KiB 文件头内解析并校验宽高尺寸。
@@ -285,7 +289,7 @@ npm run check:public
 
 `check:public` 会扫描受 Git 跟踪的文件、常见凭据格式、本机个人路径，以及解压后的测试夹具与嵌套 JSON（命中时仅报告类别与行号，不回显敏感值）。执行 `npm run check:public -- --history` 可进一步检查完整 Git 历史及提交者邮箱（要求使用 GitHub `noreply` 邮箱）。
 
-0.8.0 的接入前提、能力边界与未验证项见 [docs/接入可行性确认-20261102.md](docs/接入可行性确认-20261102.md)。
+0.9.0 的接入前提、能力边界与未验证项见 [docs/接入可行性确认-20261102.md](docs/接入可行性确认-20261102.md)。
 
 如需在本地 `git commit` 前自动运行公开文件检查，可启用仓库自带的 Git 钩子（若已配置自定义 `core.hooksPath`，请先将检查命令合并至现有钩子）：
 
