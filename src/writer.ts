@@ -1275,7 +1275,7 @@ export class WecomWriter {
       counts = {
         computed: rows.filter(row => row.status === 'present').length,
         empty: rows.filter(row => row.status === 'empty').length,
-        pending: rows.filter(row => ['pending', 'missing', 'unresolved'].includes(row.status)).length,
+        pending: rows.filter(row => ['pending', 'missing', 'unresolved', 'parse_error'].includes(row.status)).length,
         errors: rows.filter(row => row.status === 'error').length,
       };
       if (counts.errors || counts.computed || counts.empty) break;

@@ -17,6 +17,7 @@ export const BUILD_MODULES = Object.freeze({
 
 export const BUILD_COMMIT_ENV = 'WECOM_BUILD_COMMIT';
 const MANIFEST_FILE = 'build-info.json';
+let versionImportSequence = 0;
 
 const sha256 = data => createHash('sha256').update(data).digest('hex');
 
@@ -40,7 +41,7 @@ export async function createBuildInfo({ distDir = resolve('dist'), rootDir = res
   commit, gitCommit = detectGitCommit } = {}) {
   const packageInfo = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8'));
   // dist/contract-versions.js 是编译产物；加查询参数避免同一进程内重复构建时命中旧模块缓存。
-  const versions = await import(`${pathToFileURL(join(distDir, 'contract-versions.js')).href}?v=${Date.now()}`);
+  const versions = await import(`${pathToFileURL(join(distDir, 'contract-versions.js')).href}?v=${++versionImportSequence}`);
   const outputSchemaVersion = String(versions.OUTPUT_SCHEMA_VERSION);
   const derivedParserVersion = String(versions.DERIVED_PARSER_VERSION);
 

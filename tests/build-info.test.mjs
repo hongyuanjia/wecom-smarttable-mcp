@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BUILD_MODULES, createBuildInfo, writeBuildInfo } from '../scripts/generate-build-info.mjs';
+import { DERIVED_PARSER_VERSION, OUTPUT_SCHEMA_VERSION } from '../dist/contract-versions.js';
 
 const hash = data => createHash('sha256').update(data).digest('hex');
 
@@ -81,4 +82,9 @@ test('构建元数据不包含本机路径、凭据或业务数据', async t => 
   assert.equal(/\/Users\/|\/home\/|[A-Za-z]:\\\\Users/.test(text), false);
   assert.equal(/https?:\/\//.test(text), false);
   assert.equal(/scode=|access_token|signature=/i.test(text), false);
+});
+
+test('派生字段标准化契约升级同步到构建指纹版本', () => {
+  assert.equal(DERIVED_PARSER_VERSION, '2');
+  assert.equal(OUTPUT_SCHEMA_VERSION, '2');
 });
