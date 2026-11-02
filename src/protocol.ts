@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import { runningBuild } from './build-info.js';
+import { DERIVED_PARSER_VERSION, OUTPUT_SCHEMA_VERSION } from './contract-versions.js';
 import { requireData, WecomError } from './errors.js';
 import { parseMemberCell } from './members.js';
 
@@ -124,21 +125,32 @@ const derivedFormatterTypes: Record<number, string> = {
   14: 'PROGRESS', 16: 'EMAIL', 17: 'SINGLE_SELECT', 26: 'CURRENCY', 28: 'PERCENT',
 };
 
-function formatCode(value: unknown) {
-  return typeof value === 'number' || (typeof value === 'string' && value.length > 0) ? value : null;
-}
-
-export function formatterTypeName(code: unknown) {
-  if (typeof code === 'number') return derivedFormatterTypes[code] || `UNKNOWN_${code}`;
-  if (typeof code === 'string' && /^-?\d+$/.test(code)) {
-    const numeric = Number(code);
-    return derivedFormatterTypes[numeric] || `UNKNOWN_${code}`;
+// formatter 码统一为数字或 null：数字字符串（如 "14"）与 14 不能作为不同形态出现在输出里。
+function formatCode(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && /^-?\d+$/.test(value)) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
   }
   return null;
 }
 
+function sourceValue(item: Raw | undefined, camel: string, snake: string) {
+  return item?.[camel] ?? item?.[snake];
+}
+
+// 派生结果参与输出契约：解析器/结构版本直接随字段结果返回，调用方无需依赖 capabilities.build。
+function resultVersions() {
+  return { parser_version: DERIVED_PARSER_VERSION, schema_version: OUTPUT_SCHEMA_VERSION };
+}
+
+export function formatterTypeName(code: unknown) {
+  const numeric = formatCode(code);
+  return numeric === null ? null : derivedFormatterTypes[numeric] || `UNKNOWN_${numeric}`;
+}
+
 function derivedItem(item: Raw) {
-  const formatterType = formatCode(item?.formatterType ?? item?.formatter_type);
+  const formatterType = formatCode(sourceValue(item, 'formatterType', 'formatter_type'));
   const resultType = formatterTypeName(formatterType);
   const output: Raw = { text: typeof item?.text === 'string' ? item.text : null,
     formatter_type: formatterType, result_type: resultType };
@@ -153,16 +165,21 @@ function derivedItem(item: Raw) {
   if (typeof item?.link === 'string' && item.link) output.link = item.link;
   if (typeof item?.id === 'string') {
     if (resultType === 'USER') {
+      const avatarUrl = sourceValue(item, 'avatarUrl', 'avatar_url');
       output.member = { id: item.id, name: typeof item.name === 'string' ? item.name : null,
-        avatar_url: typeof (item.avatarUrl ?? item.avatar_url) === 'string' ? (item.avatarUrl ?? item.avatar_url) : null,
-        namespace: 'wecom_uid' };
+        avatar_url: typeof avatarUrl === 'string' ? avatarUrl : null, namespace: 'wecom_uid' };
     } else {
       output.option_id = item.id;
     }
   }
-  if (item?.isError) output.error = { type: typeof (item.errorType ?? item.error_type) === 'number' ? (item.errorType ?? item.error_type) : null,
-    message: typeof (item.errorMessage ?? item.error_message) === 'string' ? (item.errorMessage ?? item.error_message) : null,
-    args: Array.isArray(item.errorMessageArgs ?? item.error_message_args) ? (item.errorMessageArgs ?? item.error_message_args) : null };
+  if (item?.isError) {
+    const errorType = sourceValue(item, 'errorType', 'error_type');
+    const errorMessage = sourceValue(item, 'errorMessage', 'error_message');
+    const errorArgs = sourceValue(item, 'errorMessageArgs', 'error_message_args');
+    output.error = { type: typeof errorType === 'number' ? errorType : null,
+      message: typeof errorMessage === 'string' ? errorMessage : null,
+      args: Array.isArray(errorArgs) ? errorArgs : null };
+  }
   return output;
 }
 
@@ -221,6 +238,7 @@ function normalizeDerived(parsed: Raw): Raw {
   const primary = (item: Raw) => item.number ?? item.timestamp ?? item.checked ?? item.text ?? null;
   const status = errors.length ? 'error' : items.length ? 'present' : 'empty';
   return {
+    ...resultVersions(),
     status,
     value: items.length === 0 ? [] : items.length === 1 ? primary(items[0]) : items.map(primary),
     result_type: resultType,
@@ -271,13 +289,14 @@ function diagnosticsSnippet(text: string) {
     truncated: redacted.length > diagnosticsSnippetLimit, redacted: true };
 }
 
-// 合法但结构不符的 payload 仍可能带有 formatterType，失败时一并记录上下文。
+// 合法但结构不符的 payload 仍可能带有 formatterType/formatter_type，失败时按同一规则归一化。
 function formatterContext(parsed: unknown) {
   if (!parsed || typeof parsed !== 'object') return null;
   const record = parsed as Raw;
-  if (typeof record.formatterType === 'number') return record.formatterType;
+  const direct = formatCode(sourceValue(record, 'formatterType', 'formatter_type'));
+  if (direct !== null) return direct;
   const first = Array.isArray(record.data) ? record.data[0] : Array.isArray(record.items) ? record.items[0] : undefined;
-  return first && typeof first.formatterType === 'number' ? first.formatterType : null;
+  return first && typeof first === 'object' ? formatCode(sourceValue(first as Raw, 'formatterType', 'formatter_type')) : null;
 }
 
 function buildIdentity() {
@@ -315,7 +334,7 @@ function parseDiagnostics(decoded: Extract<DecodedDerived, { ok: false }>, sourc
 
 function parseError(decoded: Extract<DecodedDerived, { ok: false }>, source: 'k36.k1' | 'k3601',
   context: DerivedContext = {}, alternateValid = false) {
-  return { status: 'parse_error', value: null, result_type: null, computed_result: null, items: [],
+  return { ...resultVersions(), status: 'parse_error', value: null, result_type: null, computed_result: null, items: [],
     parse_error: decoded.error, parse_error_source: source, ...(alternateValid ? { alternate_valid: true } : {}),
     parse_diagnostics: parseDiagnostics(decoded, source, context) };
 }
@@ -337,7 +356,7 @@ export function parseDerivedResult(cell: Raw | undefined, context: DerivedContex
   const hasStandard = standard !== undefined && standard !== null;
   const hasLegacy = legacy !== undefined && legacy !== null;
   if (!hasStandard && !hasLegacy) {
-    return cell.k36 ? { status: 'pending', value: null, result_type: null, computed_result: null } : null;
+    return cell.k36 ? { ...resultVersions(), status: 'pending', value: null, result_type: null, computed_result: null } : null;
   }
   const standardDecoded = hasStandard ? decodeDerivedPayload(standard) : null;
   const legacyDecoded = hasLegacy ? decodeDerivedPayload(legacy) : null;
@@ -349,7 +368,7 @@ export function parseDerivedResult(cell: Raw | undefined, context: DerivedContex
   const parsed = standardDecoded?.ok ? standardDecoded.parsed : legacyDecoded?.ok ? legacyDecoded.parsed : null;
   if (!parsed) {
     if (legacyDecoded && !legacyDecoded.ok) return parseError(legacyDecoded, 'k3601', context);
-    return cell.k36 ? { status: 'pending', value: null, result_type: null, computed_result: null } : null;
+    return cell.k36 ? { ...resultVersions(), status: 'pending', value: null, result_type: null, computed_result: null } : null;
   }
   const normalized = normalizeDerived(parsed);
   if (standardDecoded?.ok && legacyDecoded?.ok
@@ -401,8 +420,8 @@ export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pi
       // FORMULA/LOOKUP 的 k36 标准单元格：保留返回类型、成员/选项引用及错误/空/待计算状态。
       values[field.id] = parseDerivedResult(cell, { ...context, document_id: context.document_id ?? docId,
         sheet_id: context.sheet_id ?? chunk.sheetId, field_id: field.id, field_type: field.type,
-        field_type_code: field.type_code }) ?? { status: cell ? 'unresolved' : 'not_returned', value: null,
-        result_type: null, computed_result: null };
+        field_type_code: field.type_code }) ?? { ...resultVersions(), status: cell ? 'unresolved' : 'not_returned',
+        value: null, result_type: null, computed_result: null };
     } else {
       const value = cell?.[`k${field.type_code}`];
       values[field.id] = { status: value !== undefined ? 'present' : cell ? 'unresolved' : 'not_returned', value: value ?? null,

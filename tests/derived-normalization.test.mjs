@@ -19,6 +19,8 @@ test('k36.k1 字符串与 k3601 对象进入同一标准化入口并输出相同
   const fromLegacy = parseDerivedResult(legacyCell(percentPayload));
   assert.deepEqual(fromLegacy, fromStandard);
   assert.deepEqual(fromStandard, {
+    parser_version: '3',
+    schema_version: '4',
     status: 'present',
     value: 0.25,
     result_type: 'PERCENT',
@@ -54,7 +56,8 @@ test('0/false/空字符串/空数组/null 保留，未返回/待计算/解析失
   assert.equal(parseDerivedResult(derivedCell({ sourceType: 19, data: [{ text: null, formatterType: 2 }] })).status, 'present');
 
   const missing = presentRecord({ sheetId: 's1', raw: {} }, formulaSchema, row({}), 'doc', ['f_derived']).fields.f_derived;
-  assert.deepEqual(missing, { status: 'not_returned', value: null, result_type: null, computed_result: null });
+  assert.deepEqual(missing, { parser_version: '3', schema_version: '4', status: 'not_returned',
+    value: null, result_type: null, computed_result: null });
   assert.equal(parseDerivedResult({ k30: 19, k36: { k2: false } }).status, 'pending');
 
   const invalid = parseDerivedResult({ k30: 19, k36: { k1: '{', k2: true } });
@@ -115,7 +118,12 @@ test('未知 formatter 保留原始格式码并标记 UNKNOWN_<code>', () => {
   const unknownString = parseDerivedResult(derivedCell({ sourceType: 19,
     data: [{ text: '自定义显示', formatterType: '88' }] }));
   assert.equal(unknownString.result_type, 'UNKNOWN_88');
-  assert.equal(unknownString.computed_result.data[0].formatter_type, '88');
+  assert.equal(unknownString.computed_result.data[0].formatter_type, 88, '数字字符串也归一化为数字');
+  const snakeCase = parseDerivedResult(derivedCell({ sourceType: 19,
+    data: [{ text: '进度', number: 0.5, formatter_type: '14' }] }));
+  assert.equal(snakeCase.result_type, 'PROGRESS');
+  assert.equal(snakeCase.computed_result.data[0].formatter_type, 14);
+  assert.equal(snakeCase.computed_result.formatter_type, 14);
 });
 
 test('双源同时存在时优先 k36.k1 并报告冲突，解析失败不被另一源静默掩盖', () => {
@@ -232,4 +240,29 @@ test('条件查询分页与总数不受派生字段标准化影响，单条异�
     assert.equal(record.fields.f_derived.status, 'not_returned');
   }
   assert.equal(results.length, 3);
+});
+
+test('分页读取中单条派生记录畸形时仍返回同页有效记录，不把整页判为空', async () => {
+  const fixture = JSON.parse(await readFile(new URL('fixtures/query-records.json', import.meta.url)));
+  const response = { retcode: 0, result: fixture.query_result };
+  const commands = JSON.parse(response.result.mutation_json);
+  const map = commands[0][0].c.k2.k1;
+  const ids = Object.keys(map).slice(0, 2);
+  map[ids[0]].k2.push({ k30: 19, k100: 'f_derived', k36: { k1: '{broken', k2: true } });
+  map[ids[1]].k2.push({ k30: 19, k100: 'f_derived', k3601: percentPayload });
+  response.result.mutation_json = JSON.stringify(commands);
+  const page = parseQueryResult(response, fixture.sheet_id, 3);
+  const schemaWithDerived = { fields: [...fixture.columns,
+    { id: 'f_derived', name: '派生', type_code: 19, type: 'FORMULA', is_primary: false }], views: [], raw: {} };
+  const fields = schemaWithDerived.fields.map(field => field.id);
+  const records = page.records.map(record => presentRecord({ sheetId: fixture.sheet_id, raw: page.raw },
+    schemaWithDerived, record, 'id_example_document', fields));
+  assert.equal(records.length, 3);
+  assert.equal(records.find(record => record.id === ids[0]).fields.f_derived.status, 'parse_error');
+  assert.equal(records.find(record => record.id === ids[0]).fields.f_derived.parse_error, 'invalid_json');
+  assert.equal(records.find(record => record.id === ids[1]).fields.f_derived.status, 'present');
+  assert.equal(records.find(record => record.id === ids[1]).fields.f_derived.value, 0.25);
+  for (const record of records.filter(record => !ids.includes(record.id))) {
+    assert.equal(record.fields.f_derived.status, 'not_returned');
+  }
 });

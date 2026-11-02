@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { WecomError } from './errors.js';
-import { assertNoDuplicateFieldIds, compareHiddenFieldSets, compareRequestedWidths, compareWidthMaps, mergeWidths,
-  validateCreateFieldSelection, validateUpdateFieldOrder } from './view-semantics.js';
+import { assertNoDuplicateFieldIds, extractHiddenFields, compareHiddenFieldSets, compareRequestedWidths,
+  compareWidthMaps, mergeWidths, validateCreateFieldSelection, validateHiddenFields, validateUpdateFieldOrder,
+  validateWidths } from './view-semantics.js';
 import type { NormalizedField } from './fields.js';
 
 type Raw = Record<string, any>;
@@ -117,12 +118,10 @@ export function normalizeView(view: Raw, fields: NormalizedField[], personalFilt
   const properties = view[`k${view.k32}`] || {};
   const columns = Array.isArray(properties.k2) ? properties.k2.filter((id: unknown): id is string => typeof id === 'string') : [];
   const widths: Record<string, number> = {};
-  const widthHidden: string[] = [];
   if (isObject(properties.k5)) {
     for (const [id, info] of Object.entries(properties.k5)) {
       // 宽度映射可能保留已删除/非本视图字段；只保留当前列，保证摘要跨分块读取稳定。
       if (isObject(info) && typeof info.k1 === 'number' && Number.isFinite(info.k1) && columns.includes(id)) widths[id] = info.k1;
-      if (isObject(info) && info.k2 === true && byId.has(id)) widthHidden.push(id);
     }
   }
   const filterRaw = properties.k8;
@@ -147,15 +146,10 @@ export function normalizeView(view: Raw, fields: NormalizedField[], personalFilt
   }));
   const type = VIEW_TYPES[view.k32] || { name: `UNVERIFIED_TYPE_${view.k32}`, verified: false };
   const unknownColumns = columns.filter((id: string) => !byId.has(id));
-  // k1 数组在真实默认视图中为空；隐藏列可能记录在这里，也可能直接从列顺序中省略。
-  // 两种来源都保留，并显式标记推断来源，避免把未知设置当成已验证语义。
-  const declaredHidden = Array.isArray(properties.k1)
-    ? properties.k1.filter((id: unknown): id is string => typeof id === 'string' && byId.has(id)) : [];
-  const hiddenFields = declaredHidden.length ? declaredHidden
-    : widthHidden.length ? widthHidden
-      : fields.map(field => field.id).filter(id => !columns.includes(id));
-  const hiddenFieldsSource = declaredHidden.length ? 'declared' as const
-    : widthHidden.length ? 'width_flags' as const : 'absent_from_columns' as const;
+  // k1 显式声明 > k5.k2 宽度标志 > 未出现在当前列；来源集中标记，避免把未知设置当成已验证语义。
+  const hidden = extractHiddenFields(view, fields.map(field => field.id));
+  const hiddenFields = hidden.hidden_fields;
+  const hiddenFieldsSource = hidden.source;
   const visibleColumns = columns.filter((id: string) => !hiddenFields.includes(id));
   const unknownSettings = [
     ...Object.keys(view).filter(key => !KNOWN_VIEW_KEYS.has(key)),
@@ -390,13 +384,9 @@ export function planViewWrite(input: {
   if (!name) throw new WecomError('INVALID_ARGUMENT', '视图需要名称。');
 
   // 同名创建比较也会读取补丁；集合/宽度校验必须先于任何比较执行，避免重复 ID 或非法宽度被静默折叠。
-  if (patch.hidden_fields !== undefined) validateFieldList(patch.hidden_fields, byId, '隐藏列', input.fields.length);
-  if (patch.widths !== undefined) {
-    for (const [id, width] of Object.entries(patch.widths)) {
-      if (!byId.has(id)) throw new WecomError('UNKNOWN_FIELD', '列宽设置包含不存在或不可读取的字段。', { field_id: id });
-      if (!Number.isInteger(width) || width < 1 || width > 1000) throw new WecomError('INVALID_ARGUMENT', '列宽必须是 1–1000 的整数。', { field_id: id, width });
-    }
-  }
+  const tableFieldIds = input.fields.map(field => field.id);
+  if (patch.hidden_fields !== undefined) validateHiddenFields(patch.hidden_fields, tableFieldIds);
+  if (patch.widths !== undefined) validateWidths(patch.widths, tableFieldIds);
 
   // 更新时重命名为另一个已存在的视图名同样需要先确认，不能静默制造同名视图。
   if (input.action === 'update' && existing && name !== existing.name) {
@@ -584,6 +574,9 @@ export function buildViewObject(input: {
   const typeCode = VIEW_TYPE_CODES[input.type];
   if (!typeCode) throw new WecomError('UNSUPPORTED_VIEW_TYPE', '不支持的视图类型。', { type: input.type });
   const fieldIds = input.fields.map(field => field.id);
+  // 直接创建视图与更新共用同一套隐藏列/列宽校验；重复 ID 不能被 Set 静默折叠。
+  validateHiddenFields(input.patch.hidden_fields || [], fieldIds);
+  validateWidths(input.patch.widths || {}, fieldIds);
   const hidden = new Set(input.patch.hidden_fields || []);
   // 新建视图使用独立的字段选择契约：允许选择全表字段的子集，但不允许重复或混入其他表字段。
   const requested = validateCreateFieldSelection(input.patch.field_order || fieldIds, fieldIds);

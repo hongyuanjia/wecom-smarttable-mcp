@@ -1,5 +1,7 @@
 import { WecomError } from './errors.js';
 
+type Raw = Record<string, any>;
+
 export interface ViewSemanticDifference {
   path: string;
   before: unknown;
@@ -15,6 +17,51 @@ export function sameFieldSet(left: readonly string[], right: readonly string[]):
 
 export function assertNoDuplicateFieldIds(ids: readonly string[], label: string): void {
   if (new Set(ids).size !== ids.length) throw new WecomError('INVALID_ARGUMENT', `${label}包含重复字段。`);
+}
+
+export function validateHiddenFields(ids: readonly string[], fieldIds: readonly string[], label = '隐藏列'): string[] {
+  assertNoDuplicateFieldIds(ids, label);
+  const known = new Set(fieldIds);
+  for (const id of ids) {
+    if (!known.has(id)) throw new WecomError('UNKNOWN_FIELD', `${label}包含不存在或不可读取的字段。`, { field_id: id });
+  }
+  return [...ids];
+}
+
+export function validateWidths(widths: Record<string, number>, fieldIds: readonly string[]): Record<string, number> {
+  const known = new Set(fieldIds);
+  for (const [id, width] of Object.entries(widths)) {
+    if (!known.has(id)) throw new WecomError('UNKNOWN_FIELD', '列宽设置包含不存在或不可读取的字段。', { field_id: id });
+    if (!Number.isInteger(width) || width < 1 || width > 1000) {
+      throw new WecomError('INVALID_ARGUMENT', '列宽必须是 1–1000 的整数。', { field_id: id, width });
+    }
+  }
+  return widths;
+}
+
+// 隐藏列来源优先级：k1 显式声明 > k5.k2 宽度标志 > 未出现在当前视图列中。
+// 计划、执行回读和核验必须从同一入口读取，否则同一视图会得到不同隐藏集合。
+export interface HiddenFieldExtraction {
+  hidden_fields: string[];
+  source: 'declared' | 'width_flags' | 'absent_from_columns';
+}
+
+export function extractHiddenFields(view: Raw, fieldIds: readonly string[]): HiddenFieldExtraction {
+  const properties = view[`k${view.k32}`] || {};
+  const known = new Set(fieldIds);
+  const columns = Array.isArray(properties.k2)
+    ? properties.k2.filter((id: unknown): id is string => typeof id === 'string') : [];
+  const declared = Array.isArray(properties.k1)
+    ? properties.k1.filter((id: unknown): id is string => typeof id === 'string' && known.has(id)) : [];
+  if (declared.length) return { hidden_fields: declared, source: 'declared' };
+  const widthFlags: string[] = [];
+  if (properties.k5 && typeof properties.k5 === 'object') {
+    for (const [id, info] of Object.entries(properties.k5)) {
+      if (info && typeof info === 'object' && (info as Raw).k2 === true && known.has(id)) widthFlags.push(id);
+    }
+  }
+  if (widthFlags.length) return { hidden_fields: widthFlags, source: 'width_flags' };
+  return { hidden_fields: fieldIds.filter(id => !columns.includes(id)), source: 'absent_from_columns' };
 }
 
 // actual 为回读现状，expected 为目标；顺序不产生差异，只报告缺少/多出的具体字段。
@@ -37,10 +84,15 @@ export function mergeWidths(existing: Record<string, number>, patch: Record<stri
   return { ...existing, ...patch };
 }
 
+function widthDifferences(ids: readonly string[], before: Record<string, number>,
+  after: Record<string, number>): ViewSemanticDifference[] {
+  return ids.flatMap(id => before[id] === after[id] ? []
+    : [{ path: `widths.${id}`, before: before[id], after: after[id] }]);
+}
+
 // 仅核验本次请求的键；差异路径精确到 widths.<field_id>。
 export function compareRequestedWidths(actual: Record<string, number>, requested: Record<string, number>): ViewSemanticDifference[] {
-  return Object.keys(requested).sort().flatMap(id => actual[id] === requested[id] ? []
-    : [{ path: `widths.${id}`, before: actual[id], after: requested[id] }]);
+  return widthDifferences(Object.keys(requested).sort(), actual, requested);
 }
 
 // 未请求键属于受保护配置：回读前后必须保持原值，不能被局部写入顺带重置。
@@ -48,15 +100,13 @@ export function compareProtectedWidths(before: Record<string, number>, after: Re
   requested: readonly string[]): ViewSemanticDifference[] {
   const requestedSet = new Set(requested);
   const ids = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(id => !requestedSet.has(id)).sort();
-  return ids.flatMap(id => before[id] === after[id] ? []
-    : [{ path: `widths.${id}`, before: before[id], after: after[id] }]);
+  return widthDifferences(ids, before, after);
 }
 
 // 完整目标字典（例如新建视图）也使用同一路径格式，不返回整段大对象。
 export function compareWidthMaps(actual: Record<string, number>, expected: Record<string, number>): ViewSemanticDifference[] {
   const ids = [...new Set([...Object.keys(actual), ...Object.keys(expected)])].sort();
-  return ids.flatMap(id => actual[id] === expected[id] ? []
-    : [{ path: `widths.${id}`, before: actual[id], after: expected[id] }]);
+  return widthDifferences(ids, actual, expected);
 }
 
 export interface UpdateFieldOrderContext {

@@ -315,6 +315,16 @@ test('视图对象：可见字段顺序、动态“我”、看板分组与卡�
 
   assert.throws(() => buildViewObject({ ...base, patch: { field_order: ['f_text', 'f_text'] } }),
     error => error.code === 'INVALID_ARGUMENT' && /重复/.test(error.message));
+  assert.throws(() => buildViewObject({ ...base, patch: { hidden_fields: ['f_text', 'f_text'] } }),
+    error => error.code === 'INVALID_ARGUMENT' && /重复/.test(error.message));
+  assert.throws(() => buildViewObject({ ...base, patch: { hidden_fields: ['f_missing'] } }),
+    error => error.code === 'UNKNOWN_FIELD' && error.details.field_id === 'f_missing');
+  for (const width of [0, -1, 1001, 140.5]) {
+    assert.throws(() => buildViewObject({ ...base, patch: { widths: { f_text: width } } }),
+      error => error.code === 'INVALID_ARGUMENT', String(width));
+  }
+  assert.throws(() => buildViewObject({ ...base, patch: { widths: { f_missing: 140 } } }),
+    error => error.code === 'UNKNOWN_FIELD' && error.details.field_id === 'f_missing');
 });
 
 test('隐藏列从宽度配置 k5.k2 解析，并提供可见列集合', () => {

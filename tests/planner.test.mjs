@@ -278,21 +278,30 @@ test('核对：列宽补丁只验证请求键，A=300/实际 299 报 widths.A，
   assert.deepEqual(applied.actions[0].differences, []);
 });
 
-test('核对：11 视图隐藏列乱序与局部列宽补丁从误报 pending 恢复为 verified', () => {
+test('核对：11 个不同配置的视图在隐藏列乱序与局部列宽补丁下均为 verified', () => {
   const names = ['任务总览一', '任务总览二', '任务总览三', '任务总览四', '任务总览五',
     '任务总览六', '任务总览七', '任务总览八', '任务总览九', '任务总览十', '任务总览十一'];
+  const hiddenVariants = [
+    ['f_title'], ['f_owner'], ['f_collab'], ['f_count'], ['f_status'], ['f_subtask'],
+    ['f_title', 'f_owner'], ['f_collab', 'f_count'], ['f_status', 'f_subtask'],
+    ['f_rel', 'f_existing_lookup'], ['f_title', 'f_status', 'f_owner'],
+  ];
+  const widthField = index => allFieldIds[index % allFieldIds.length];
+  const widthValue = index => 120 + index;
   const views = names.map((name, index) => hiddenView(`v_sample_${index}`, name,
-    { widths: { f_title: 120, f_owner: 140, f_count: 0 } }));
+    { hidden: hiddenVariants[index], widths: { [widthField(index)]: widthValue(index) } }));
   const changes = names.map((_, index) => ({ kind: 'view', action: 'update', sheet_id: 't_people',
     view_id: `v_sample_${index}`, patch: {
-      hidden_fields: ['f_title', 'f_owner', 'f_status'],
-      widths: { f_title: 120, f_owner: 140 },
+      // 乱序提交同一集合，验证集合语义而不是复用完全相同的隐藏列表。
+      hidden_fields: [...hiddenVariants[index]].reverse(),
+      widths: { [widthField(index)]: widthValue(index) },
     } }));
   const result = verifyChanges(context({ views }), changes);
   assert.equal(result.actions.length, 11);
   assert.equal(result.summary.verified, 11);
   assert.equal(result.summary.pending, 0);
   assert.equal(result.status, 'verified');
+  assert.equal(new Set(views.map(view => view.hidden_fields.join(','))).size, 11);
 });
 
 test('29 字段表、16 列视图：16 列排列完成 plan → 回读 → verify，重复执行无变化', () => {
