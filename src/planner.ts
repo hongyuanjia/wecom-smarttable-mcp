@@ -223,19 +223,36 @@ function lookupAction(context: PlanContext, change: Extract<PlanChange, { kind: 
   action.summary = `新建查找引用字段「${change.name}」`;
   if (!change.name.trim()) throw new WecomError('INVALID_ARGUMENT', '查找引用字段需要名称。');
   if (!isObject(change.lookup)) throw new WecomError('INVALID_ARGUMENT', 'lookup 配置必须是对象。');
-  const targetSheetId = change.lookup.target_sheet_id;
-  if (typeof targetSheetId !== 'string') throw new WecomError('INVALID_ARGUMENT', 'lookup 需要 target_sheet_id。');
+  const relationFieldId = typeof change.lookup.relation_field_id === 'string' ? change.lookup.relation_field_id : undefined;
+  const conditions = Array.isArray(change.lookup.conditions) ? change.lookup.conditions : [];
+  let targetSheetId = change.lookup.target_sheet_id;
+  if (relationFieldId) {
+    const relationField = fieldOf(sheet, relationFieldId);
+    if (!['LINK_RECORDS', 'TWO_WAY_LINK_RECORDS'].includes(relationField.type)) {
+      throw new WecomError('INVALID_ARGUMENT', '沿关联字段引用只能使用单向或双向关联字段。', { field_id: relationFieldId });
+    }
+    const relationTarget = relationField.attributes?.kind === 'RELATION'
+      ? relationField.attributes.target_sheet_id : relationField.target_sheet_ids[0];
+    if (!relationTarget) throw new WecomError('UNSUPPORTED_FIELD_CONFIG', '关联字段缺少可读取的目标子表。', { field_id: relationFieldId });
+    if (targetSheetId !== undefined && targetSheetId !== relationTarget) {
+      throw new WecomError('INVALID_ARGUMENT', '目标子表与关联字段指向的子表不一致。', { target_sheet_id: targetSheetId, relation_target: relationTarget });
+    }
+    targetSheetId = relationTarget;
+    if (conditions.length) throw new WecomError('INVALID_ARGUMENT', '沿关联字段引用不能同时提供条件匹配。');
+    action.notes.push('沿关联字段引用：由来源记录已关联的目标记录集合读取目标字段。');
+  } else if (typeof targetSheetId !== 'string') {
+    throw new WecomError('INVALID_ARGUMENT', '条件匹配模式需要 target_sheet_id。');
+  }
   const aggregation = change.lookup.aggregation ?? 'values';
   if (!['values', 'unique', 'sum', 'count', 'count_unique', 'average', 'max', 'min'].includes(String(aggregation))) {
     throw new WecomError('UNSUPPORTED_LOOKUP_CONFIG', '不支持的统计方式。', { aggregation });
   }
-  const targetSheet = sheetOf(context, targetSheetId);
+  const targetSheet = sheetOf(context, targetSheetId as string);
   const targetFieldId = change.lookup.target_field_id;
   if (typeof targetFieldId !== 'string' || !targetSheet.fields.some(field => field.id === targetFieldId)) {
     throw new WecomError('UNKNOWN_FIELD', '查找引用的目标字段不属于目标子表。', { target_sheet_id: targetSheet.id, field_id: targetFieldId });
   }
-  const conditions = change.lookup.conditions;
-  if (!Array.isArray(conditions) || !conditions.length || conditions.length > 20) {
+  if (!relationFieldId && (!conditions.length || conditions.length > 20)) {
     throw new WecomError('INVALID_ARGUMENT', '查找引用需要 1–20 个匹配条件。');
   }
   const sides: Record<'source' | 'target', PlanSheet> = { source: sheet, target: targetSheet };
@@ -341,11 +358,11 @@ function relationFieldAction(context: PlanContext, change: Extract<PlanChange, {
 function relationCellsAction(context: PlanContext, change: Extract<PlanChange, { kind: 'relation_cells' }>, index: number): PlannedAction {
   const sheet = sheetOf(context, change.sheet_id);
   const field = fieldOf(sheet, change.field_id);
-  if (field.type !== 'LINK_RECORDS') {
-    throw new WecomError('INVALID_ARGUMENT', '关联单元格写入目标必须是已验证的单向关联字段。', { field_id: field.id });
+  if (!['LINK_RECORDS', 'TWO_WAY_LINK_RECORDS'].includes(field.type)) {
+    throw new WecomError('INVALID_ARGUMENT', '关联单元格写入目标必须是单向或双向关联字段。', { field_id: field.id });
   }
   const action = actionBase(index, change, 'relation.cell.write');
-  action.summary = `写入 ${change.updates.length} 个关联单元格`;
+  action.summary = `写入 ${change.updates.length} 个${field.type === 'TWO_WAY_LINK_RECORDS' ? '双向' : '单向'}关联单元格`;
   const recordIds = new Set(change.updates.map(update => update.record_id));
   if (recordIds.size !== change.updates.length) throw new WecomError('INVALID_ARGUMENT', '关联更新包含重复记录。');
   if (sheet.record_ids) {

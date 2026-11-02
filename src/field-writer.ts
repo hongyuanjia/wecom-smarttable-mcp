@@ -18,6 +18,8 @@ export interface LookupSpec {
   target_field_id: string;
   aggregation: 'values' | 'unique' | 'sum' | 'count' | 'count_unique' | 'average' | 'max' | 'min';
   conditions: LookupCondition[];
+  /** 沿来源表的单向/双向关联字段引用目标字段；为空时使用条件匹配。 */
+  relation_field_id?: string;
 }
 
 export interface RelationSpec {
@@ -59,32 +61,42 @@ const aggregationDisplay: Record<LookupSpec['aggregation'], Raw> = {
 
 export function lookupFieldMutations(sheetId: string, schema: Schema, name: string, spec: LookupSpec) {
   if (schema.fields.some(field => field.name === name)) throw new WecomError('DUPLICATE_FIELD_NAME', '新字段名称与已有字段重名。', { name });
-  if (!spec.conditions.length) throw new WecomError('INVALID_ARGUMENT', '查找引用至少需要一个匹配条件。');
+  if (spec.relation_field_id ? spec.conditions.length : !spec.conditions.length) {
+    throw new WecomError('INVALID_ARGUMENT', spec.relation_field_id
+      ? '沿关联字段引用不能同时提供条件匹配。' : '查找引用至少需要一个匹配条件。');
+  }
   const fieldId = newFieldId(schema);
   const indexes = insertionIndexes(schema);
-  const property = {
-    '1': '', '2': spec.target_field_id, '3': aggregationCode[spec.aggregation], '4': 1, '5': spec.target_sheet_id,
-    '6': { '1': 1, '2': spec.conditions.map(condition => {
-      const base: Raw = {
-        '1': conditionId(), '2': condition.target_field_id,
-        '3': condition.target_field_type, '4': condition.operator_code,
-      };
-      if (condition.local_field_id) {
-        base['5'] = { '1': 1, '2': condition.local_field_id };
-      } else {
-        const wrapper: Raw = {};
-        wrapper[String(condition.target_field_type)] = condition.value;
-        base['5'] = { '1': 0, '3': wrapper, '4': condition.target_field_type };
-      }
-      return base;
-    }) },
-    '7': aggregationDisplay[spec.aggregation],
-  };
+  const property = spec.relation_field_id
+    ? {
+      // 网页端 DEFAULT 模式：k1=关联字段，k4=upgradeType(0)，k5 为空，k6 为空条件。
+      '1': spec.relation_field_id, '2': spec.target_field_id, '3': aggregationCode[spec.aggregation],
+      '4': 0, '5': '', '6': { '1': 1, '2': [] }, '7': aggregationDisplay[spec.aggregation],
+    }
+    : {
+      '1': '', '2': spec.target_field_id, '3': aggregationCode[spec.aggregation], '4': 1, '5': spec.target_sheet_id,
+      '6': { '1': 1, '2': spec.conditions.map(condition => {
+        const base: Raw = {
+          '1': conditionId(), '2': condition.target_field_id,
+          '3': condition.target_field_type, '4': condition.operator_code,
+        };
+        if (condition.local_field_id) {
+          base['5'] = { '1': 1, '2': condition.local_field_id };
+        } else {
+          const wrapper: Raw = {};
+          wrapper[String(condition.target_field_type)] = condition.value;
+          base['5'] = { '1': 0, '3': wrapper, '4': condition.target_field_type };
+        }
+        return base;
+      }) },
+      '7': aggregationDisplay[spec.aggregation],
+    };
   const insert = mutation(3014, { '1': sheetId, '3': { '1': fieldId, '2': 20, '3': name, '4': indexes }, '4': false });
   const config = mutation(3017, { '1': sheetId, '3': fieldId, '4': { '20': property, '31': 20 }, '5': null, '6': false });
   return {
     field: { id: fieldId, name, type_code: 20, type: 'LOOKUP', target_sheet_id: spec.target_sheet_id,
-      target_field_id: spec.target_field_id, aggregation: spec.aggregation, conditions: spec.conditions },
+      target_field_id: spec.target_field_id, aggregation: spec.aggregation, conditions: spec.conditions,
+      ...(spec.relation_field_id ? { relation_field_id: spec.relation_field_id } : {}) },
     expected: { '20': property, '31': 20 },
     mutations: [insert, config, ...widthMutations(sheetId, indexes, fieldId, 120)],
   };

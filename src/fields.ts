@@ -37,7 +37,8 @@ export type FieldAttributes =
   | { kind: 'SYSTEM'; read_only: true }
   | { kind: 'RELATION'; target_sheet_id: string | null; multiple: boolean | null; two_way: boolean | null }
   | { kind: 'FORMULA'; tokens: { type: number; text?: string; field_id?: string }[] }
-  | { kind: 'LOOKUP'; target_sheet_id: string | null; target_field_id: string | null; aggregation: string;
+  | { kind: 'LOOKUP'; mode: 'conditions' | 'relation'; relation_field_id: string | null; target_sheet_id: string | null;
+      target_field_id: string | null; aggregation: string; upgrade_type: number | null;
       conditions: { target_field_id: string; local_field_id: string; operator_code: number | null }[] }
   | { kind: 'UNKNOWN'; type_code: number };
 
@@ -154,14 +155,17 @@ function attributesFor(field: Raw, type: string): { attributes: FieldAttributes 
         unparsed: Object.keys(config || {}).filter(key => key !== 'k1') };
     }
     case 'LOOKUP': {
-      const aggregationCodes: Record<number, string> = { 0: 'values', 3: 'count', 4: 'count_unique' };
+      const aggregationCodes: Record<number, string> = { 0: 'values', 1: 'unique', 2: 'sum', 3: 'count',
+        4: 'count_unique', 5: 'average', 6: 'max', 7: 'min' };
       const conditions = Array.isArray(config?.k6?.k2) ? config.k6.k2.filter(isObject).map((condition: Raw) => ({
         target_field_id: typeof condition.k2 === 'string' ? condition.k2 : '',
         local_field_id: typeof condition.k5?.k2 === 'string' ? condition.k5.k2 : '',
         operator_code: numberOrNull(condition.k3),
       })) : [];
-      return { attributes: { kind: 'LOOKUP', target_sheet_id: stringOrNull(config?.k5),
-        target_field_id: stringOrNull(config?.k2),
+      const relationFieldId = stringOrNull(config?.k1);
+      return { attributes: { kind: 'LOOKUP', mode: relationFieldId ? 'relation' : 'conditions',
+        relation_field_id: relationFieldId, target_sheet_id: stringOrNull(config?.k5),
+        target_field_id: stringOrNull(config?.k2), upgrade_type: numberOrNull(config?.k4),
         aggregation: aggregationCodes[numberOrNull(config?.k3) ?? -1] || 'unknown', conditions }, status: 'verified',
         unparsed: Object.keys(config || {}).filter(key => !['k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7'].includes(key)) };
     }

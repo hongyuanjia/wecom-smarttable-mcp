@@ -122,3 +122,23 @@ test('查找引用统计方式：八种真实编码，数值聚合要求数字�
     assert.equal(built.expected['20']['3'], code);
   }
 });
+
+
+test('查找引用沿关联字段引用：k1=关联字段、k4=0、条件为空', () => {
+  const built = lookupFieldMutations('t_people', schema, '关联引用', {
+    target_sheet_id: 't_sub', target_field_id: 'f_name', aggregation: 'values',
+    conditions: [], relation_field_id: 'f_link',
+  });
+  const property = built.expected['20'];
+  assert.equal(property['1'], 'f_link');
+  assert.equal(property['2'], 'f_name');
+  assert.equal(property['4'], 0);
+  assert.equal(property['5'], '');
+  assert.deepEqual(property['6'], { '1': 1, '2': [] });
+  assert.equal(built.field.relation_field_id, 'f_link');
+  assert.throws(() => lookupFieldMutations('t_people', schema, '关联引用2', {
+    target_sheet_id: 't_sub', target_field_id: 'f_name', aggregation: 'values',
+    conditions: [{ target_field_id: 'f_no', target_field_type: 1, operator_code: 1, local_field_id: 'f_task' }],
+    relation_field_id: 'f_link',
+  }), error => error.code === 'INVALID_ARGUMENT');
+});
