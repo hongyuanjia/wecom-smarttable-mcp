@@ -8,7 +8,7 @@ export type CapabilityStatus = 'verified' | 'local_only' | 'unavailable';
 export type SupportLevel = 'verified' | 'inferred' | 'unverified' | 'unsupported' | 'not_applicable';
 
 export const EVIDENCE_DATE = '2026-11-02';
-export const EVIDENCE_SOURCE = '本机 0.7.0 协议样本、2026-11-02 结构读取、真实视图/成员写入及离线测试';
+export const EVIDENCE_SOURCE = '本机 0.9.0 协议样本、2026-11-02 结构读取与网页端抓包、真实视图/成员/查询写入回读及离线测试';
 
 export interface Capability {
   id: string;
@@ -33,9 +33,12 @@ export const capabilities: Capability[] = [
   verified('structure.read', '读取子表目录、字段定义、视图配置摘要、记录总数与 revision。',
     ['视图的完整显示设置与未知属性仍以原始键名保留，语义未逐项验证。']),
   verified('records.read', '按整张可访问子表分页读取记录，包括图片/附件定位器。'),
-  verified('records.query', '服务端条件查询：TEXT 的 eq/ne/contains/not_contains、单选/多选的 eq/ne/contains/not_contains、人员 eq/ne、数字/进度/日期比较、复选框与关联的空值判断。',
-    ['URL、电话、邮箱、复选框值比较和关联记录值比较尚未取得可用编码，会明确拒绝而不是返回全表。',
-      '空值条件 eq/empty 与 not_empty 已在 TEXT、日期、人员、关联字段上真实查询。']),
+  verified('records.query', '服务端条件查询：TEXT/URL/电话/邮箱与关联标题文本的 eq/ne/contains/not_contains、单选/多选的 eq/ne/contains/not_contains、复选框 eq/ne、人员 eq/ne、数字/进度比较、日期比较，以及各类型的 empty/not_empty。',
+    ['值键：URL 用 valueUrl、电话用 valuePhoneNumber、邮箱用 valueEmail，均为字符串；复选框用 valueCheckbox 布尔值；多选用 valueSelects 选项 ID 数组；进度用 valueProgress 数字。',
+      'LINK_RECORDS(18)/TWO_WAY_LINK_RECORDS(21) 没有记录 ID 过滤：只编码 filterKeyType=1 + valueText，按被关联记录标题做 eq/ne/contains/not_contains；empty/not_empty 仍用字段类型码。不编码 valueReferences/valueTwoWayLinkRecords。',
+      '错误的值键名会被服务端静默忽略并退化为全表，因此键名与 JSON 类型由本机严格校验，不依赖服务端报错。',
+      '复选框网页 UI 只提供 eq/ne，empty/not_empty 经 API 层真实验证可用。',
+      '空值条件已在 TEXT、URL、电话、邮箱、复选框、多选、日期、人员、关联与双向关联字段上真实查询。']),
   verified('asset.download', '按记录定位器下载原图或附件。', ['有权限的微盘文件下载尚未验证。']),
   verified('records.write.basic', '修改普通类型单元格并回读校验。',
     ['TEXT/NUMBER/CHECKBOX/DATE_TIME/PROGRESS/PHONE/EMAIL/SINGLE_SELECT/MULTIPLE_SELECT 已验证。']),
@@ -66,13 +69,17 @@ export const capabilities: Capability[] = [
       '跨用户并发修改不被本工具原子保护。',
       '原值未读取时不得执行依赖原值的追加/移除。']),
 
-  verified('view.read', '读取并规范化视图名称、类型、共享/锁定/个人作用域、可编辑性、筛选、排序、分组、列顺序、列宽、个人临时筛选与 raw_digest。',
+  verified('view.read', '读取并规范化视图名称、类型、共享/锁定/个人作用域、可编辑性、筛选、排序、分组、列顺序、列宽、个人临时筛选、字段统计标志（statistics_enabled）与 raw_digest。',
     ['筛选连接符 1=and、2=or 与运算符 1=eq、3=contains 已用真实写入确认；其他运算符仍只保留原始代码。',
       '可编辑性按 k35（共享/锁定/个人）和 k34 owner 计算；共享视图仍受文档权限约束。']),
   verified('view.create', '通过 HTTP commitchanges 命令 3006 新建共享/锁定/个人表格或看板视图，包含筛选、分组、排序、列顺序和列宽。',
-    ['共享 k35=1、锁定 k35=2、个人 k35=3 已通过创建与回读验证。', '表格/看板以外的视图类型未验证。']),
-  verified('view.update', '通过 HTTP 3009 改名/作用域、3021 筛选、3020 排序、3022 分组、3018 隐藏列、3024 列宽、3016 列顺序、3033 冻结列，并回读核对；支持 expected_view_digest 视图级并发校验。',
-    ['个人/锁定/公共作用域已通过 3009 c.3={2:3/2/1} 写入并回读。', '多步更新中途失败会返回 PARTIAL_APPLY 和已完成步骤。', '统计行 k10 只读取，未找到可靠写入路径时会拒绝。']),
+    ['共享 k35=1、锁定 k35=2、个人 k35=3 已通过创建与回读验证。', '表格/看板以外的视图类型未验证。',
+      '同名视图按规范化配置比较：唯一且相同返回已有视图并标记 no_changes；唯一但不同返回 VIEW_CONFIG_DIFF 和差异摘要；多个同名返回 VIEW_AMBIGUOUS，要求用 view_id 定位。']),
+  verified('view.update', '通过 HTTP 3009 改名/作用域、3021 筛选、3020 排序、3022 分组、3018 隐藏列、3024 列宽、3016 列顺序、3033 冻结列、3025 字段统计标志，并回读核对；支持 expected_view_digest 视图级并发校验。',
+    ['个人/锁定/公共作用域已通过 3009 c.3={2:3/2/1} 写入并回读。', '多步更新中途失败会返回 PARTIAL_APPLY 和已完成步骤。',
+      '3025 写入 {1:sheetId,2:viewId,3:{1:boolean}} 并回读 k1.k10；statistics:null 归一化为关闭。',
+      'k10 是字段统计启用标志，不是底部统计行显隐；底部行始终存在，逐列统计由 3019 控制。当前 PC build 没有用户可见的 k10 开关，3025 属于内部命令路径。',
+      '逐列统计 3019 的持久化读写不在本工具范围。']),
   verified('view.delete', '通过 HTTP 3007 删除共享视图，并按索引回读核对；至少保留一个视图。'),
   verified('view.records.read', '读取视图配置并在本机按共享筛选条件过滤记录，支持动态“我”和常用字段类型。',
     ['个人临时筛选不叠加；分组只返回定义，不重排记录。', '未识别的筛选运算符会返回 UNSUPPORTED_VIEW_FILTER。']),
@@ -94,8 +101,9 @@ export const capabilities: Capability[] = [
 
   verified('formula.create', '通过 HTTP 3014/3017 创建公式字段，支持 8 种展示格式和已验证函数。',
     ['函数：IF/ISBLANK/TODAY/COUNT/COUNTA/COUNTIF（仅数值字段）/DATEDIF（按天）/CONCATENATE/ROUND；其他函数拒绝。',
-      'COALESCE/PERCENT 在提供方计算为 errorType 8（不识别的内容），写入前以 UNSUPPORTED_FORMULA 拒绝。',
+      'COALESCE/PERCENT 在提供方计算为 errorType 8（不识别的内容），网页端也没有函数目录项；写入前以 UNSUPPORTED_FORMULA 拒绝。',
       '文本字段的 COUNTIF 在提供方计算为 errorType 4（计算错误），写入前拒绝；数值 COUNTIF 可用。',
+      '直接创建与计划工具共用函数登记、参数数量、参数类型、返回类型、声明依赖、依赖冲突和循环校验，失败不提交写入。',
       '格式：text/number/percent/currency/date/checkbox/email/progress，可设小数位、千位符和日期格式。',
       '禁止使用 JavaScript eval 执行用户公式。']),
   verified('formula.update', '通过 HTTP 3017 修改公式字段名称、表达式或展示格式，并回读配置与计算结果。',
@@ -109,8 +117,9 @@ export const capabilities: Capability[] = [
     ['计划中的提供方写入项会按能力矩阵标记为 blocked；不提交任何线上修改。']),
   verified('verify.live', '重新读取线上结构与记录，与计划或目标配置比较。',
     ['只能核对已规范化的字段/视图/成员值；提供方未解释的原始配置标记为 unknown。']),
-  verified('execution.log', '每次提交后在本机 executions/ 记录 execution_id、时间、文档/子表、操作、版本和 verified/not_verified 状态。',
-    ['日志不含 Cookie、Token 或签名链接；权限 600；只记录已发出提交请求的操作。']),
+  verified('execution.log', '每次提交后在本机 executions/ 记录 execution_id、可选 plan_id、时间、文档/子表、操作、版本和 verified/not_verified 状态。',
+    ['日志不含 Cookie、Token 或签名链接；权限 600；只记录已发出提交请求的操作。',
+      'wecom_list_executions 可按 document_id 与 plan_id 筛选；每个文档默认保留最近 1000 条，保存新日志时清理最旧条目，可用 WECOM_MCP_EXECUTION_RETENTION 调整。']),
 
   verified('subtable.create', '通过 HTTP 3001 在现有文档中新建智能表子表。'),
   verified('subtable.rename', '通过 HTTP 3004 重命名子表。'),
