@@ -26,6 +26,15 @@ export interface ViewCondition {
   semantics: 'inferred' | 'unverified';
 }
 
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Raw).sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 export interface NormalizedView {
   id: string;
   name: string;
@@ -101,7 +110,7 @@ function personalFilterSummary(filter: unknown) {
 const KNOWN_VIEW_KEYS = new Set(['k1', 'k30', 'k31', 'k32', 'k33', 'k34', 'k35', 'k37', 'k38']);
 const KNOWN_SETTING_KEYS = new Set(['k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7', 'k8', 'k9', 'k10', 'k13']);
 
-export function normalizeView(view: Raw, fields: NormalizedField[], personalFilter?: unknown): NormalizedView {
+export function normalizeView(view: Raw, fields: NormalizedField[], personalFilter?: unknown, currentUid?: string | null): NormalizedView {
   const byId = new Map(fields.map(field => [field.id, field]));
   const properties = view[`k${view.k32}`] || {};
   const columns = Array.isArray(properties.k2) ? properties.k2.filter((id: unknown): id is string => typeof id === 'string') : [];
@@ -109,7 +118,8 @@ export function normalizeView(view: Raw, fields: NormalizedField[], personalFilt
   const widthHidden: string[] = [];
   if (isObject(properties.k5)) {
     for (const [id, info] of Object.entries(properties.k5)) {
-      if (isObject(info) && typeof info.k1 === 'number' && Number.isFinite(info.k1)) widths[id] = info.k1;
+      // 宽度映射可能保留已删除/非本视图字段；只保留当前列，保证摘要跨分块读取稳定。
+      if (isObject(info) && typeof info.k1 === 'number' && Number.isFinite(info.k1) && columns.includes(id)) widths[id] = info.k1;
       if (isObject(info) && info.k2 === true && byId.has(id)) widthHidden.push(id);
     }
   }
@@ -157,6 +167,9 @@ export function normalizeView(view: Raw, fields: NormalizedField[], personalFilt
     auto_sort: typeof properties.k6 === 'boolean' ? properties.k6 : null,
   };
   const scope: NormalizedView['scope'] = view.k35 === 3 ? 'personal' : view.k35 === 2 ? 'locked' : 'shared';
+  // 锁定视图所有成员都不可改配置；个人视图仅 owner 可改；共享视图按文档权限判断。
+  const editable = scope === 'locked' ? false : scope === 'personal'
+    ? (currentUid ? view.k34 === currentUid : null) : true;
   return {
     id: view.k30,
     name: view.k31,
@@ -164,7 +177,7 @@ export function normalizeView(view: Raw, fields: NormalizedField[], personalFilt
     type_code: view.k32,
     type_verified: type.verified,
     scope,
-    editable: null,
+    editable,
     columns,
     visible_columns: visibleColumns,
     hidden_fields: hiddenFields,
@@ -183,13 +196,14 @@ export function normalizeView(view: Raw, fields: NormalizedField[], personalFilt
     dynamic_viewer: { supported: true,
       reason: '动态“我”使用 k35=true 表达；已用真实视图创建验证。' },
     unknown_settings: [...new Set(unknownSettings)].sort(),
-    raw_digest: createHash('sha256').update(JSON.stringify(view)).digest('hex'),
-    config_digest: createHash('sha256').update(JSON.stringify(config)).digest('hex'),
+    raw_digest: createHash('sha256').update(stableStringify(view)).digest('hex'),
+    config_digest: createHash('sha256').update(stableStringify(config)).digest('hex'),
   };
 }
 
-export function normalizeViews(rawViews: Raw[], fields: NormalizedField[], personalFilters: Record<string, unknown> = {}): NormalizedView[] {
-  return rawViews.map(view => normalizeView(view, fields, personalFilters[view.k30]));
+export function normalizeViews(rawViews: Raw[], fields: NormalizedField[], personalFilters: Record<string, unknown> = {},
+  currentUid?: string | null): NormalizedView[] {
+  return rawViews.map(view => normalizeView(view, fields, personalFilters[view.k30], currentUid));
 }
 
 export interface ViewConditionInput {
@@ -208,6 +222,7 @@ export interface ViewWriteInput {
   name?: string;
   type?: ViewType;
   scope?: 'shared' | 'locked' | 'personal';
+  expected_view_digest?: string;
   filter?: ViewFilterInput | null;
   group?: { field_id: string; descending?: boolean }[];
   sort?: { field_id: string; descending?: boolean }[];

@@ -208,3 +208,11 @@ test('视图范围：k35 映射公共/锁定/个人，创建时写入对应级�
     recordIds: [], fields, patch: { name: '锁定', scope: 'locked' } });
   assert.equal(locked['35'], 2);
 });
+
+
+test('视图可编辑性：锁定不可改，个人仅 owner 可改，共享按文档权限', () => {
+  assert.equal(normalizeView({ ...rawView(), k35: 2 }, fields, undefined, 'owner_example').editable, false);
+  assert.equal(normalizeView({ ...rawView(), k35: 3 }, fields, undefined, 'owner_example').editable, true);
+  assert.equal(normalizeView({ ...rawView(), k35: 3 }, fields, undefined, 'other_user').editable, false);
+  assert.equal(normalizeView({ ...rawView(), k35: 1 }, fields, undefined, 'other_user').editable, true);
+});

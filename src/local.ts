@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -8,6 +8,7 @@ export const dataDir = resolve(process.env.WECOM_MCP_DATA_DIR || join(homedir(),
 export const statePath = join(dataDir, 'state.json');
 export const profilePath = join(dataDir, 'profile');
 export const plansPath = join(dataDir, 'plans');
+export const executionsPath = join(dataDir, 'executions');
 
 export async function privateDirectory(path = dataDir) {
   await mkdir(path, { recursive: true, mode: 0o700 });
@@ -66,5 +67,33 @@ export async function loadPlan(planId: string) {
     return JSON.parse(await readFile(join(plansPath, `${planId}.json`), 'utf8'));
   } catch {
     throw new WecomError('UNKNOWN_PLAN', '本机没有此计划记录；请先使用 wecom_plan_changes 生成计划。', { plan_id: planId });
+  }
+}
+
+
+export async function saveExecution(entry: Record<string, unknown>) {
+  const executionId = `e${Date.now().toString(36)}${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+  const value = { execution_id: executionId, timestamp: new Date().toISOString(), ...entry };
+  await privateDirectory(executionsPath);
+  const path = join(executionsPath, `${executionId}.json`);
+  await writeFile(path, JSON.stringify(value), { flag: 'wx', mode: 0o600 });
+  return { execution_id: executionId, path };
+}
+
+export async function listExecutions(documentId?: string, limit = 50) {
+  try {
+    const files = (await readdir(executionsPath)).filter(name => name.endsWith('.json')).sort().reverse();
+    const entries: Record<string, unknown>[] = [];
+    for (const file of files) {
+      if (entries.length >= limit) break;
+      try {
+        const value = JSON.parse(await readFile(join(executionsPath, file), 'utf8'));
+        if (documentId && value.document_id !== documentId) continue;
+        entries.push(value);
+      } catch { /* ignore unreadable log entries */ }
+    }
+    return entries;
+  } catch {
+    return [];
   }
 }

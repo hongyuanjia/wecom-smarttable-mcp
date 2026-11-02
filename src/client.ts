@@ -225,7 +225,8 @@ export class WecomClient {
         const normalizedFields = normalizeFields(schema, directory.map((s: Raw) => s.id).filter((id: unknown): id is string => typeof id === 'string'));
         const sheetFilters = filters.filter((f: Raw) => f.sheetId === entry.id);
         const personalFilters = Object.fromEntries(sheetFilters.map((f: Raw) => [f.viewId, f.filter]));
-        const normalizedViews = normalizeViews(schema.raw.k4, normalizedFields, personalFilters);
+        const currentUid = typeof open.clientVars?.uin === 'string' ? open.clientVars.uin : null;
+        const normalizedViews = normalizeViews(schema.raw.k4, normalizedFields, personalFilters, currentUid);
         return { id: entry.id, name: entry.name, type: entry.type, parent_id: entry.parentid || null, hidden: entry.hidden,
           revision: chunk.revision, total_records_in_table: chunk.total, fields: schema.fields,
           field_attributes: normalizedFields,
@@ -233,10 +234,10 @@ export class WecomClient {
           view_configs: normalizedViews,
           dependencies: { cycles: dependencyCycles(normalizedFields) },
           capabilities: {
-            field_config: 'read_only_unverified_semantics',
-            member_cells: 'read_unverified',
-            view_config: 'read_only_unverified_semantics',
-            writes: 'blocked_until_provider_verification',
+            field_config: 'verified_write_via_specialized_tools',
+            member_cells: 'verified_write_via_specialized_tools',
+            view_config: 'verified_write_via_specialized_tools',
+            writes: 'verified_with_revision_checks',
           } };
       }));
       // 等待本批只读请求全部结束后再报错，避免关闭仍在使用的请求上下文；返回顺序保持目录顺序。

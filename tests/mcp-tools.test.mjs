@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
-test('真实 stdio MCP 公布三十二个工具，新写入口按能力矩阵拒绝并保持旧契约', async () => {
+test('真实 stdio MCP 公布三十三个工具，新写入口按能力矩阵拒绝并保持旧契约', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'wecom-tool-contract-'));
   const client = new Client({ name: 'wecom-tool-contract', version: '0.4.0' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('dist/server.js')], env: { WECOM_MCP_DATA_DIR: dataDir }, stderr: 'pipe' });
@@ -17,13 +17,13 @@ test('真实 stdio MCP 公布三十二个工具，新写入口按能力矩阵拒
     const packageInfo = JSON.parse(await readFile(new URL('../package.json', import.meta.url)));
     assert.equal(client.getServerVersion().version, packageInfo.version);
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, 32);
+    assert.equal(tools.length, 33);
     for (const name of ['create_table', 'update_records', 'add_records', 'delete_records', 'add_fields', 'delete_fields', 'delete_table',
       'update_member_cells', 'create_view', 'update_view', 'delete_view', 'update_fields', 'create_lookup_field', 'create_relation_field',
       'update_relation_cells', 'create_formula_field', 'update_formula_field', 'create_sheet', 'rename_sheet', 'delete_sheet', 'upload_asset']) {
       assert.equal(tools.find(t => t.name === `wecom_${name}`).annotations.readOnlyHint, false, name);
     }
-    for (const name of ['capabilities', 'search_members', 'validate_members', 'read_view', 'read_view_records', 'plan_changes', 'verify_changes']) {
+    for (const name of ['capabilities', 'search_members', 'validate_members', 'read_view', 'read_view_records', 'plan_changes', 'verify_changes', 'list_executions']) {
       assert.equal(tools.find(t => t.name === `wecom_${name}`).annotations.readOnlyHint, true, name);
     }
     const query = tools.find(t => t.name === 'wecom_query_records');

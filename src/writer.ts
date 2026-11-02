@@ -3,19 +3,45 @@ import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { WecomClient } from './client.js';
-import { documentReference, documentUrl } from './local.js';
+import { documentReference, documentUrl, saveExecution } from './local.js';
 import { WecomError, requireData } from './errors.js';
 import { type Chunk, type Schema } from './protocol.js';
 import { parseDocumentRole, parseRecyclePage } from './document-protocol.js';
 import { acknowledgedClears, addColumnMutations, appendRank, columnViewsMatch, deleteColumnMutations, memberUpdateMutations, mutation, newId, uniqueIds, updateMutations, valuesMatch,
   type CellValue, type ColumnInput, type MemberChange, type Mutation, type RecordInput } from './mutations.js';
-import { cellsFor } from './protocol.js';
-import { buildViewObject, encodeViewFilter, encodeViewGroup, encodeViewSort, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
+import { cellsFor, parseDerivedResult } from './protocol.js';
+import { buildViewObject, encodeViewFilter, encodeViewGroup, encodeViewSort, normalizeView, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
 import { normalizeFields } from './fields.js';
 import { formulaFieldMutations, formulaFormatter, formulaFormatterMatches, lookupFieldMutations, relationFieldMutations, type FormulaFormatSpec, type LookupSpec, type RelationSpec } from './field-writer.js';
 import { encodeProviderFormula, type FormulaExpression } from './formulas.js';
 
 type Raw = Record<string, any>;
+
+function derivedCellKey(cell: Raw | undefined, typeCode: number): string | null {
+  if (!cell) return null;
+  if (typeCode === 1) {
+    const fragments = cell.k1;
+    if (!Array.isArray(fragments)) return null;
+    const text = fragments.map((item: Raw) => typeof item?.k2 === 'string' ? item.k2 : '').join('');
+    return text.length ? text : null;
+  }
+  if (typeCode === 21) {
+    const ids = (cell.k21?.k1 || []).map((item: Raw) => item.k3).filter((id: unknown) => typeof id === 'string');
+    return ids.length ? ids.sort().join(',') : null;
+  }
+  if (typeCode === 18) {
+    const ids = Array.isArray(cell.k18) ? cell.k18.filter((id: unknown) => typeof id === 'string') : [];
+    return ids.length ? ids.sort().join(',') : null;
+  }
+  const value = cell[`k${typeCode}`];
+  if (value === undefined || value === null || value === '') return null;
+  if (typeCode === 7 && Array.isArray(value)) {
+    const ids = value.map((item: Raw) => item?.k1).filter((id: unknown) => typeof id === 'string');
+    return ids.length ? ids.sort().join(',') : null;
+  }
+  if ([9, 17].includes(typeCode) && Array.isArray(value)) return value.length ? value.slice().sort().join(',') : null;
+  return String(value);
+}
 
 const FORMULA_FORMAT_NAMES = ['text', 'number', 'percent', 'currency', 'date', 'checkbox', 'email', 'progress'] as const;
 
@@ -302,6 +328,19 @@ export class WecomWriter {
     return rows;
   }
 
+  private async allRows(target: Target, sheetId: string) {
+    const rows: { id: string; raw: Raw }[] = [];
+    let page = await this.client.chunk(target.doc.id, sheetId, 0, 200);
+    for (;;) {
+      rows.push(...page.records);
+      const next = page.end + 1;
+      if (next >= page.total) break;
+      requireData(next > page.start, '记录分页没有前进。');
+      page = await this.client.chunk(target.doc.id, sheetId, next, 200);
+    }
+    return rows;
+  }
+
   private async requireRecords(target: Target, ids: string[]) {
     uniqueIds(ids, '记录列表');
     const rows = await this.records(target, target.chunk, new Set(ids));
@@ -343,14 +382,26 @@ export class WecomWriter {
       requireData(after.revision === committedRevision, '回读版本与提交确认不一致，需要重新核对并发变化。');
       const schema = await this.client.schema(target.doc.id, after);
       if (!await verify(after, schema, acknowledgedClears(mutations, accepted.changeset))) throw new WecomError('WRITE_MISMATCH', '重新读取的结果与请求不一致。');
-      return { ...intent, status: 'verified', previous_revision: revision, committed_revision: committedRevision, revision: after.revision };
+      const executionId = await this.recordExecution({ status: 'verified', document_id: target.doc.id,
+        sheet_id: target.sheetId, operation, ...affected, previous_revision: revision,
+        committed_revision: committedRevision, revision: after.revision });
+      return { ...intent, execution_id: executionId, status: 'verified', previous_revision: revision,
+        committed_revision: committedRevision, revision: after.revision };
     } catch (error) {
+      const reasonCode = error instanceof WecomError ? error.code : 'LOCAL_ERROR';
+      const reasonMessage = error instanceof WecomError ? error.message : '本地错误';
+      const executionId = await this.recordExecution({ status: 'not_verified', document_id: target.doc.id,
+        sheet_id: target.sheetId, operation, ...affected, committed_revision: committedRevision,
+        reason_code: reasonCode, reason_message: reasonMessage });
       throw new WecomError('WRITE_NOT_VERIFIED', '服务端已返回写入响应，但回读未能完整核对；请先检查目标，不能直接重复提交。', {
-        ...intent, committed_revision: committedRevision, reason_code: error instanceof WecomError ? error.code : 'LOCAL_ERROR',
-        ...(error instanceof WecomError ? { reason_message: error.message } : {}),
-        may_have_written: true, automatic_retry: false,
+        ...intent, execution_id: executionId, committed_revision: committedRevision, reason_code: reasonCode,
+        reason_message: reasonMessage, may_have_written: true, automatic_retry: false,
       });
     }
+  }
+
+  private async recordExecution(entry: Raw) {
+    try { return (await saveExecution(entry)).execution_id; } catch { return null; }
   }
 
   async updateRecords(url: string, sheetId: string, revision: number, rows: RecordInput[]) {
@@ -444,6 +495,12 @@ export class WecomWriter {
     const target = await this.prepare(url, sheetId, revision);
     const raw = target.schema.raw.k4.find((candidate: Raw) => candidate.k30 === viewId);
     if (!raw) throw new WecomError('UNKNOWN_VIEW', 'view_id 不存在或不可读取。', { view_id: viewId });
+    // 用规范化配置摘要而不是原始视图对象：原始宽度映射会随分块读取范围变化。
+    const actualViewDigest = normalizeView(raw, normalizeFields(target.schema, [sheetId])).config_digest;
+    if (patch.expected_view_digest && actualViewDigest !== patch.expected_view_digest) {
+      throw new WecomError('STALE_VIEW', '视图配置已变化；请重新读取视图后再决定修改。', { view_id: viewId,
+        expected_view_digest: patch.expected_view_digest, actual_view_digest: actualViewDigest });
+    }
     if (patch.type !== undefined && VIEW_TYPE_CODES[patch.type] !== raw.k32) {
       throw new WecomError('UNSUPPORTED_VIEW_CHANGE', '不支持修改视图类型；请新建目标类型视图。');
     }
@@ -536,6 +593,10 @@ export class WecomWriter {
         return Object.entries(patch.widths!).every(([id, width]) => widths[id]?.k1 === width);
       } });
     }
+    if (patch.statistics !== undefined && patch.statistics !== (rawViewProperties(raw).k10 === true)) {
+      // 网页端没有可验证的统计行开关入口；读配置可用，写入保持拒绝。
+      throw new WecomError('UNSUPPORTED_VIEW_CHANGE', '统计显示切换尚未找到可验证的写入路径；当前只读取该设置。');
+    }
     if (patch.frozen_field_count !== undefined) {
       const count = patch.frozen_field_count ?? 0;
       changes.push({ commands: [mutation(3033, { '1': sheetId, '2': viewId, '3': { '1': count } })],
@@ -573,11 +634,23 @@ export class WecomWriter {
     }
     let current = target;
     let committedRevision = target.chunk.revision;
-    for (const change of changes) {
-      const result = await this.apply(current, change.commands, 'update_view', { view_id: viewId },
-        async (_after, schema) => change.verify(schema));
-      committedRevision = result.revision;
-      if (change !== changes[changes.length - 1]) {
+    const completed: Raw[] = [];
+    for (let step = 0; step < changes.length; step += 1) {
+      const change = changes[step];
+      try {
+        const result = await this.apply(current, change.commands, 'update_view', { view_id: viewId, step },
+          async (_after, schema) => change.verify(schema));
+        completed.push({ step, revision: result.revision, execution_id: result.execution_id });
+        committedRevision = result.revision;
+      } catch (error) {
+        if (!completed.length) throw error;
+        throw new WecomError('PARTIAL_APPLY', '视图更新分多步提交，部分步骤已生效；请先回读视图再决定是否继续。', {
+          view_id: viewId, completed_steps: completed, failed_step: step, total_steps: changes.length,
+          reason_code: error instanceof WecomError ? error.code : 'LOCAL_ERROR',
+          reason_message: error instanceof Error ? error.message : String(error),
+          may_have_written: true, automatic_retry: false });
+      }
+      if (step !== changes.length - 1) {
         const chunk = await this.client.chunk(target.doc.id, target.sheetId, 0, 200);
         const schema = await this.client.schema(target.doc.id, chunk);
         current = { ...target, chunk, schema };
@@ -700,14 +773,39 @@ export class WecomWriter {
   }
 
   async createLookupField(url: string, sheetId: string, revision: number, name: string,
-    spec: { target_sheet_id: string; target_field_id: string; aggregation: LookupSpec['aggregation'];
+    spec: { target_sheet_id?: string; target_field_id: string; relation_field_id?: string;
+      aggregation: LookupSpec['aggregation']; fail_on_ambiguous?: boolean;
       conditions: { target_field_id: string; local_field_id?: string; value?: string | number | boolean | string[];
         operator?: 'eq' | 'contains' }[] }) {
     const target = await this.prepare(url, sheetId, revision);
-    const targetChunk = await this.client.chunk(target.doc.id, spec.target_sheet_id, 0, 1);
+    const relationField = spec.relation_field_id
+      ? target.schema.fields.find(field => field.id === spec.relation_field_id) : undefined;
+    if (spec.relation_field_id && !relationField) {
+      throw new WecomError('UNKNOWN_FIELD', '沿关联字段引用需要来源表中存在的关联字段。', { field_id: spec.relation_field_id });
+    }
+    if (relationField && ![18, 21].includes(relationField.type_code)) {
+      throw new WecomError('INVALID_ARGUMENT', '沿关联字段引用只能使用单向或双向关联字段。', { field_id: relationField.id });
+    }
+    let targetSheetId = spec.target_sheet_id;
+    if (relationField) {
+      const relationReadback = target.schema.raw.k3[relationField.id];
+      const relationTarget = relationReadback?.[`k${relationField.type_code}`]?.k2;
+      if (typeof relationTarget !== 'string' || !relationTarget) {
+        throw new WecomError('UNSUPPORTED_FIELD_CONFIG', '关联字段缺少可读取的目标子表。', { field_id: relationField.id });
+      }
+      if (targetSheetId && targetSheetId !== relationTarget) {
+        throw new WecomError('INVALID_ARGUMENT', '目标子表与关联字段指向的子表不一致。', { target_sheet_id: targetSheetId, relation_target: relationTarget });
+      }
+      targetSheetId = relationTarget;
+      if (spec.conditions.length) throw new WecomError('INVALID_ARGUMENT', '沿关联字段引用不能同时提供条件匹配。');
+    } else {
+      if (!targetSheetId) throw new WecomError('INVALID_ARGUMENT', '条件匹配模式需要 target_sheet_id。');
+      if (!spec.conditions.length) throw new WecomError('INVALID_ARGUMENT', '条件匹配模式至少需要一个条件。');
+    }
+    const targetChunk = await this.client.chunk(target.doc.id, targetSheetId, 0, 1);
     const targetSchema = await this.client.schema(target.doc.id, targetChunk);
     const targetField = targetSchema.fields.find(field => field.id === spec.target_field_id);
-    if (!targetField) throw new WecomError('UNKNOWN_FIELD', '要引用的目标字段不存在或不可读取。', { target_sheet_id: spec.target_sheet_id, target_field_id: spec.target_field_id });
+    if (!targetField) throw new WecomError('UNKNOWN_FIELD', '要引用的目标字段不存在或不可读取。', { target_sheet_id: targetSheetId, target_field_id: spec.target_field_id });
     if (['sum', 'average', 'max', 'min'].includes(spec.aggregation) && ![2, 14].includes(targetField.type_code)) {
       throw new WecomError('UNSUPPORTED_LOOKUP_CONFIG', '求和/平均/最大/最小只能用于数字或进度字段。', { field_type: targetField.type_code });
     }
@@ -752,17 +850,26 @@ export class WecomWriter {
         ...(condition.local_field_id !== undefined ? { local_field_id: condition.local_field_id } : { value }),
       };
     });
-    const resolvedSpec: LookupSpec = { target_sheet_id: spec.target_sheet_id, target_field_id: spec.target_field_id,
-      aggregation: spec.aggregation, conditions: resolvedConditions };
+    const resolvedSpec: LookupSpec = { target_sheet_id: targetSheetId, target_field_id: spec.target_field_id,
+      aggregation: spec.aggregation, conditions: resolvedConditions,
+      ...(spec.relation_field_id ? { relation_field_id: spec.relation_field_id } : {}) };
+    const diagnostics = await this.lookupDiagnostics(target, sheetId, targetSheetId, targetSchema,
+      resolvedConditions, spec.relation_field_id, spec.fail_on_ambiguous === true);
     const { field, expected, mutations } = lookupFieldMutations(sheetId, target.schema, name, resolvedSpec);
-    return this.apply(target, mutations, 'create_lookup_field', { field_id: field.id, name, target_sheet_id: spec.target_sheet_id },
+    const result = await this.apply(target, mutations, 'create_lookup_field',
+      { field_id: field.id, name, target_sheet_id: targetSheetId,
+        ...(spec.relation_field_id ? { relation_field_id: spec.relation_field_id } : {}) },
       async (_after, schema) => {
         const raw = schema.raw.k3[field.id];
         if (!raw || raw.k30 !== name || raw.k31 !== 20) return false;
         const config = raw.k20 || {};
         const conditions = config.k6?.k2 || [];
-        return config.k2 === spec.target_field_id && config.k5 === spec.target_sheet_id
-          && config.k3 === expected['20']['3']
+        if (spec.relation_field_id) {
+          return config.k1 === spec.relation_field_id && config.k2 === spec.target_field_id
+            && config.k3 === expected['20']['3'] && config.k4 === 0 && config.k5 === '' && conditions.length === 0;
+        }
+        return config.k1 === '' && config.k2 === spec.target_field_id && config.k5 === targetSheetId
+          && config.k4 === 1 && config.k3 === expected['20']['3']
           && conditions.length === resolvedConditions.length
           && resolvedConditions.every((condition, index) => {
             const localFieldId = 'local_field_id' in condition ? condition.local_field_id : undefined;
@@ -770,6 +877,63 @@ export class WecomWriter {
               && (localFieldId !== undefined ? conditions[index]?.k5?.k2 === localFieldId : conditions[index]?.k5?.k1 === 0);
           });
       });
+    return { ...result, diagnostics };
+  }
+
+  private async lookupDiagnostics(target: Target, sourceSheetId: string, targetSheetId: string,
+    targetSchema: Schema, conditions: LookupSpec['conditions'], relationFieldId: string | undefined,
+    failOnAmbiguous: boolean) {
+    const sourceRows = await this.allRows(target, sourceSheetId);
+    const targetRows = await this.allRows(target, targetSheetId);
+    if (relationFieldId) {
+      const relation = target.schema.fields.find(field => field.id === relationFieldId);
+      const type = relation?.type_code;
+      let linked = 0; let empty = 0; let links = 0;
+      for (const row of sourceRows) {
+        const cell = row.raw.k1?.[relationFieldId];
+        const ids = type === 21
+          ? (cell?.k21?.k1 || []).map((item: Raw) => item.k3).filter((id: unknown) => typeof id === 'string')
+          : (cell?.[`k${type}`] || []).filter((id: unknown) => typeof id === 'string');
+        links += ids.length;
+        if (ids.length) linked += 1; else empty += 1;
+      }
+      return { mode: 'relation', relation_field_id: relationFieldId, source_records: sourceRows.length,
+        target_records: targetRows.length, linked_source_records: linked, empty_source_records: empty, links,
+        ambiguous: false };
+    }
+    const keyCondition = conditions.find(condition => condition.local_field_id !== undefined);
+    if (!keyCondition) {
+      return { mode: 'conditions', key_field: null, source_records: sourceRows.length,
+        target_records: targetRows.length, ambiguous: false, zero_match_source_records: null, multi_match_source_records: null };
+    }
+    const targetKeyField = targetSchema.fields.find(field => field.id === keyCondition.target_field_id);
+    const sourceKeyField = target.schema.fields.find(field => field.id === keyCondition.local_field_id);
+    requireData(targetKeyField && sourceKeyField, '查找诊断缺少匹配键字段。');
+    const targetCounts = new Map<string, number>();
+    for (const row of targetRows) {
+      const key = derivedCellKey(row.raw.k1?.[targetKeyField.id], targetKeyField.type_code);
+      if (key !== null) targetCounts.set(key, (targetCounts.get(key) || 0) + 1);
+    }
+    let zero = 0; let multi = 0; let empty = 0; const sourceCounts = new Map<string, number>();
+    for (const row of sourceRows) {
+      const key = derivedCellKey(row.raw.k1?.[sourceKeyField.id], sourceKeyField.type_code);
+      if (key === null) { empty += 1; continue; }
+      sourceCounts.set(key, (sourceCounts.get(key) || 0) + 1);
+      const count = targetCounts.get(key) || 0;
+      if (count === 0) zero += 1;
+      if (count > 1) multi += 1;
+    }
+    const duplicateKeys = [...targetCounts.entries()].filter(([, count]) => count > 1)
+      .slice(0, 20).map(([value, count]) => ({ value, count }));
+    if (failOnAmbiguous && duplicateKeys.length) {
+      throw new WecomError('LOOKUP_AMBIGUOUS', '目标表匹配键存在多匹配；请先明确聚合规则或修正匹配键。', {
+        key_field_id: targetKeyField.id, duplicate_keys: duplicateKeys });
+    }
+    return { mode: 'conditions', key_field: targetKeyField.id, source_key_field: sourceKeyField.id,
+      source_records: sourceRows.length, target_records: targetRows.length,
+      distinct_target_keys: targetCounts.size, distinct_source_keys: sourceCounts.size,
+      duplicate_keys: duplicateKeys, zero_match_source_records: zero, multi_match_source_records: multi,
+      empty_source_keys: empty, ambiguous: duplicateKeys.length > 0 };
   }
 
   async createRelationField(url: string, sheetId: string, revision: number, name: string, spec: RelationSpec) {
@@ -867,13 +1031,22 @@ export class WecomWriter {
       verifyAsset = cell => cell.k1 === fileName && cell.k2 === buffer.length && cell.k4 === md5;
     }
     const delta = { '30': type, [String(type)]: [entry], '31': target.uid };
-    return this.apply(target, [mutation(3013, { '1': sheetId, '3': recordId, '4': { [fieldId]: delta }, '5': target.user, '7': false })],
-      'upload_asset', { field_id: fieldId, record_id: recordId, name: fileName, size: buffer.length },
-      async (after) => {
-        const row = after.records.find(record => record.id === recordId);
-        const cells = row?.raw?.k1?.[fieldId]?.[`k${type}`];
-        return Array.isArray(cells) && cells.some((cell: Raw) => verifyAsset(cell));
-      });
+    try {
+      return await this.apply(target, [mutation(3013, { '1': sheetId, '3': recordId, '4': { [fieldId]: delta }, '5': target.user, '7': false })],
+        'upload_asset', { field_id: fieldId, record_id: recordId, name: fileName, size: buffer.length },
+        async (after) => {
+          const row = after.records.find(record => record.id === recordId);
+          const cells = row?.raw?.k1?.[fieldId]?.[`k${type}`];
+          return Array.isArray(cells) && cells.some((cell: Raw) => verifyAsset(cell));
+        });
+    } catch (error) {
+      throw new WecomError('PARTIAL_APPLY', '文件已上传，但单元格写入未确认；请先回读目标单元格，不要重复上传。', {
+        field_id: fieldId, record_id: recordId, file_name: fileName, size: buffer.length,
+        uploaded_asset_id: type === 5 ? entry['1'] : entry['6'],
+        reason_code: error instanceof WecomError ? error.code : 'LOCAL_ERROR',
+        reason_message: error instanceof Error ? error.message : String(error),
+        may_have_written: true, automatic_retry: false });
+    }
   }
 
   async updateRelationCells(url: string, sheetId: string, revision: number, fieldId: string,
@@ -987,7 +1160,7 @@ export class WecomWriter {
             && (actual[index]?.k3 || null) === (token['3'] || null))
           && formulaFormatterMatches(raw.k19?.k2, formatter);
       });
-    return { ...result, calculation: await this.formulaCalculation(target, field.id) };
+    return { ...result, config_status: result.status === 'verified' ? 'saved' : 'unknown', calculation: await this.formulaCalculation(target, field.id) };
   }
 
   async updateFormulaField(url: string, sheetId: string, revision: number, fieldId: string,
@@ -1025,14 +1198,40 @@ export class WecomWriter {
         }
         return true;
       });
-    return { ...result, calculation: await this.formulaCalculation(target, fieldId) };
+    return { ...result, config_status: result.status === 'verified' ? 'saved' : 'unknown', calculation: await this.formulaCalculation(target, fieldId) };
   }
 
   private async formulaCalculation(target: Target, fieldId: string) {
-    const chunk = await this.client.chunk(target.doc.id, target.sheetId, 0, 50);
-    const samples = chunk.records.map(record => record.raw.k1?.[fieldId]?.k36?.k1).filter((value): value is string => typeof value === 'string');
-    const errors = samples.filter(value => value.includes('"isError":true')).length;
-    return { sampled: samples.length, errors, status: errors ? 'errors' : samples.length ? 'computed' : 'pending' };
+    let rows: Raw[] = [];
+    let counts = { computed: 0, empty: 0, pending: 0, errors: 0 };
+    // 计算可能异步完成；有限次数等待，超时保持 pending，不把“未返回”当成空值。
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const chunk = await this.client.chunk(target.doc.id, target.sheetId, 0, 50);
+      rows = chunk.records.map(record => {
+        const parsed = parseDerivedResult(record.raw.k1?.[fieldId]);
+        const items = parsed?.computed_result?.data || [];
+        const text = items.map((item: Raw) => item.text).filter((value: unknown): value is string => typeof value === 'string').join('');
+        return { record_id: record.id, status: parsed?.status ?? 'missing', text,
+          result_type: parsed?.result_type ?? null, error: (parsed as Raw)?.errors?.[0] ?? null };
+      });
+      counts = {
+        computed: rows.filter(row => row.status === 'present').length,
+        empty: rows.filter(row => row.status === 'empty').length,
+        pending: rows.filter(row => ['pending', 'missing', 'unresolved'].includes(row.status)).length,
+        errors: rows.filter(row => row.status === 'error').length,
+      };
+      if (counts.errors || counts.computed || counts.empty) break;
+      if (attempt < 3) await setTimeout(500, undefined, { signal: this.signal });
+    }
+    const status = counts.errors ? 'errors' : counts.computed ? 'computed' : counts.empty ? 'empty' : 'pending';
+    const calculationStatus = counts.errors ? 'error' : counts.computed ? 'verified' : counts.empty ? 'empty' : 'pending';
+    const resultType = rows.find(row => row.result_type)?.result_type ?? null;
+    return {
+      status, config_status: 'saved', calculation_status: calculationStatus,
+      sampled: rows.length, computed: counts.computed, empty: counts.empty, pending: counts.pending, errors: counts.errors,
+      result_type: resultType, samples: rows.slice(0, 5),
+      ...(counts.errors ? { error_details: rows.filter(row => row.error).map(row => ({ record_id: row.record_id, ...row.error })) } : {}),
+    };
   }
 
   async addFields(url: string, sheetId: string, revision: number, columns: ColumnInput[]) {
