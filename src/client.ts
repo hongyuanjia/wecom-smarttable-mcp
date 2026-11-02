@@ -4,11 +4,106 @@ import { request, type APIRequestContext } from 'playwright';
 import { lstat, readFile } from 'node:fs/promises';
 import { WecomError, requireData } from './errors.js';
 import { documentUrl, statePath } from './local.js';
-import { parseChunk, parseJson, presentRecord, selectFields, type Chunk, type Schema } from './protocol.js';
+import { cellsFor, parseChunk, parseJson, presentRecord, selectFields, type Chunk, type Field, type Schema } from './protocol.js';
+import { dependencyCycles, normalizeFields, type NormalizedField } from './fields.js';
+import { normalizeViews, type NormalizedView } from './views.js';
+import { parseMemberCell, type MemberCell } from './members.js';
+import type { PlanContext, PlanSheet } from './planner.js';
 
 const DOC = 'https://doc.weixin.qq.com';
 const READ_PATHS = new Set(['/api/smartsheet/reader/query_sheet_data', '/cgi-bin/online_docs/user_info', '/dop-api/opendoc', '/dop-api/get/sheet', '/api/smartsheet/reader/fetch_view_filter_spec',
-  '/diskauth/get_auth_info', '/diskfile/recycle_list', '/diskfile/querytaskresult']);
+  '/diskauth/get_auth_info', '/diskfile/recycle_list', '/diskfile/querytaskresult', '/diskaddr/list', '/webdisk/member_info']);
+
+function cellText(cell: Raw | undefined) {
+  if (!cell || !Array.isArray(cell.k1)) return '';
+  return cell.k1.map((item: Raw) => typeof item?.k2 === 'string' ? item.k2 : '').join('');
+}
+
+function cellSelectIds(cell: Raw | undefined) {
+  const ids = Array.isArray(cell?.k17) ? cell.k17 : Array.isArray(cell?.k9) ? cell.k9 : [];
+  return ids.filter((id: unknown): id is string => typeof id === 'string');
+}
+
+function cellUserIds(cell: Raw | undefined) {
+  return (Array.isArray(cell?.k7) ? cell.k7 : []).map((item: Raw) => typeof item?.k1 === 'string' ? item.k1 : null)
+    .filter((id: string | null): id is string => Boolean(id));
+}
+
+function conditionValues(value: unknown) {
+  if (Array.isArray(value)) return value.filter(item => typeof item === 'string');
+  if (typeof value === 'string') return [value];
+  if (value && typeof value === 'object' && typeof (value as Raw).k1 === 'string') return [(value as Raw).k1];
+  return [];
+}
+
+function matchesViewCondition(cell: Raw | undefined, fieldType: number, operator: number | null,
+  value: unknown, dynamic: boolean, currentUid: string | null) {
+  if (dynamic) {
+    if (!currentUid) throw new WecomError('VIEWER_REQUIRED', '视图含动态“我”条件，但当前登录账号 uid 不可用。');
+    return cellUserIds(cell).includes(currentUid);
+  }
+  if (fieldType === 1) {
+    const text = cellText(cell);
+    const target = conditionValues(value)[0] ?? '';
+    return operator === 3 ? text.includes(target) : text === target;
+  }
+  if (fieldType === 17 || fieldType === 9) {
+    const ids = cellSelectIds(cell);
+    const target = conditionValues(value);
+    return operator === 1 ? ids.length === target.length && target.every(id => ids.includes(id))
+      : target.some(id => ids.includes(id));
+  }
+  if (fieldType === 7) {
+    const ids = cellUserIds(cell);
+    const target = conditionValues(value);
+    return operator === 1 ? ids.length === target.length && target.every(id => ids.includes(id))
+      : target.some(id => ids.includes(id));
+  }
+  if (fieldType === 2 || fieldType === 4) {
+    const raw = fieldType === 2 ? cell?.k2 : Number(cell?.k4);
+    const actual = typeof raw === 'number' ? raw : Number(raw);
+    const target = Number(conditionValues(value)[0]);
+    if (!Number.isFinite(actual) || !Number.isFinite(target)) return false;
+    if (operator === 1) return actual === target;
+    if (operator === 2) return actual > target;
+    if (operator === 4) return actual < target;
+    return false;
+  }
+  throw new WecomError('UNSUPPORTED_VIEW_FILTER', '此字段类型的视图筛选尚未实现本机过滤。', { field_type: fieldType });
+}
+
+function matchesViewFilter(cells: Raw, filter: NonNullable<NormalizedView['filter']>, byId: Map<string, Field>, currentUid: string | null) {
+  const results = filter.conditions.map(condition => {
+    const field = byId.get(condition.field_id);
+    if (!field) throw new WecomError('UNKNOWN_FIELD', '视图筛选引用了不存在或不可读取的字段。', { field_id: condition.field_id });
+    return matchesViewCondition(cells[condition.field_id], field.type_code, condition.operator_code,
+      condition.value, condition.dynamic_viewer, currentUid);
+  });
+  return filter.conjunction === 'or' ? results.some(Boolean) : results.every(Boolean);
+}
+
+function sortViewRows(rows: { id: string; raw: Raw }[], sort: NormalizedView['sort'], byId: Map<string, Field>) {
+  if (!sort.length) return rows;
+  return [...rows].sort((left, right) => {
+    for (const item of sort) {
+      const field = byId.get(item.field_id);
+      if (!field) continue;
+      const cellLeft = left.raw?.k1?.[item.field_id];
+      const cellRight = right.raw?.k1?.[item.field_id];
+      let a: string | number = '';
+      let b: string | number = '';
+      if (field.type_code === 1) { a = cellText(cellLeft); b = cellText(cellRight); }
+      else if (field.type_code === 2) { a = Number(cellLeft?.k2 ?? 0); b = Number(cellRight?.k2 ?? 0); }
+      else if (field.type_code === 4) { a = Number(cellLeft?.k4 ?? 0); b = Number(cellRight?.k4 ?? 0); }
+      else { a = cellText(cellLeft); b = cellText(cellRight); }
+      if (a === b) continue;
+      const result = typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b), 'zh-CN');
+      return item.descending ? -result : result;
+    }
+    return 0;
+  });
+}
+
 type Raw = Record<string, any>;
 
 export class WecomClient {
@@ -127,9 +222,22 @@ export class WecomClient {
       const batch = await Promise.allSettled(entries.slice(start, start + 4).map(async entry => {
         const chunk = await this.chunk(doc.id, entry.id, 0, 1);
         const schema = await this.schema(doc.id, chunk);
+        const normalizedFields = normalizeFields(schema, directory.map((s: Raw) => s.id).filter((id: unknown): id is string => typeof id === 'string'));
+        const sheetFilters = filters.filter((f: Raw) => f.sheetId === entry.id);
+        const personalFilters = Object.fromEntries(sheetFilters.map((f: Raw) => [f.viewId, f.filter]));
+        const normalizedViews = normalizeViews(schema.raw.k4, normalizedFields, personalFilters);
         return { id: entry.id, name: entry.name, type: entry.type, parent_id: entry.parentid || null, hidden: entry.hidden,
           revision: chunk.revision, total_records_in_table: chunk.total, fields: schema.fields,
-          views: schema.views.map(v => ({ ...v, personal_filter: filters.find((f: Raw) => f.sheetId === entry.id && f.viewId === v.id)?.filter || null })) };
+          field_attributes: normalizedFields,
+          views: schema.views.map(v => ({ ...v, personal_filter: filters.find((f: Raw) => f.sheetId === entry.id && f.viewId === v.id)?.filter || null })),
+          view_configs: normalizedViews,
+          dependencies: { cycles: dependencyCycles(normalizedFields) },
+          capabilities: {
+            field_config: 'read_only_unverified_semantics',
+            member_cells: 'read_unverified',
+            view_config: 'read_only_unverified_semantics',
+            writes: 'blocked_until_provider_verification',
+          } };
       }));
       // 等待本批只读请求全部结束后再报错，避免关闭仍在使用的请求上下文；返回顺序保持目录顺序。
       for (const result of batch) {
@@ -194,6 +302,57 @@ export class WecomClient {
     return result.records.at(0);
   }
 
+  async readViewRecords(input: string, sheetId: string, viewId: string, pageSize: number, offset: number,
+    fields?: string[], includeTextFragments = false) {
+    const doc = documentUrl(input);
+    await this.checkSession();
+    const { open } = await this.openDocument(input);
+    const currentUid = typeof open.clientVars?.uin === 'string' ? open.clientVars.uin : null;
+    const structure = await this.structure(input, sheetId);
+    const sheet = structure.sheets[0];
+    const view = sheet.view_configs.find(candidate => candidate.id === viewId);
+    if (!view) throw new WecomError('UNKNOWN_VIEW', '视图 ID 不属于此子表或不可读取。', { sheet_id: sheetId, view_id: viewId });
+    let page = await this.chunk(doc.id, sheetId, 0, 200);
+    const schema = await this.schema(doc.id, page);
+    const firstRevision = page.revision;
+    const firstTotal = page.total;
+    const rows: { id: string; raw: Raw }[] = [];
+    for (;;) {
+      if (page.revision !== firstRevision || page.total !== firstTotal) {
+        throw new WecomError('DOCUMENT_CHANGED', '按视图读取期间表格版本变化，请重新读取。');
+      }
+      rows.push(...page.records);
+      const next = page.end + 1;
+      if (next >= page.total) break;
+      page = await this.chunk(doc.id, sheetId, next, 200);
+    }
+    const byId = new Map(schema.fields.map(field => [field.id, field]));
+    const filtered = view.filter
+      ? rows.filter(row => matchesViewFilter(row.raw?.k1 || {}, view.filter!, byId, currentUid))
+      : rows;
+    const sorted = sortViewRows(filtered, view.sort, byId);
+    const selected: string[] = fields || schema.fields.map(field => field.id);
+    const columns = selectFields(schema, selected);
+    const pageRows = sorted.slice(offset, offset + pageSize);
+    const records = pageRows.map(row => presentRecord(page, schema, row, doc.id, selected, includeTextFragments));
+    const nextOffset = offset + records.length < sorted.length ? offset + records.length : null;
+    return {
+      document_id: doc.id, sheet_id: sheetId, sheet_name: sheet.name, revision: firstRevision,
+      view: { id: view.id, name: view.name, type: view.type, filter: view.filter, sort: view.sort,
+        group: view.group, hidden_fields: view.hidden_fields, viewer_dependent: view.viewer_dependent },
+      total_records: firstTotal, matched_records: sorted.length, offset, returned_count: records.length,
+      next_offset: nextOffset, columns, records, view_filter_applied: true,
+      text_fragments_included: includeTextFragments,
+      notes: [
+        '筛选在本机按视图条件应用；分组只返回定义，不重排记录。',
+        '动态“我”使用当前登录账号的 uid；未验证其他账号的实际结果。',
+        '视图排序只对已支持的类型排序，未知类型保持服务端顺序。',
+      ],
+      limitations: ['只支持视图当前已解析的筛选条件；未识别运算符会返回 UNSUPPORTED_VIEW_FILTER。',
+        '个人临时筛选不叠加；共享视图筛选才生效。'],
+    };
+  }
+
   async readRecords(input: string, sheetId: string, pageSize: number, fields?: string[], cursor?: string, includeTextFragments?: boolean) {
     const doc = documentUrl(input);
     const position = cursor ? parseReadCursor(cursor, doc.id, sheetId) : undefined;
@@ -221,4 +380,137 @@ export class WecomClient {
   }
 
   async close() { await this.context.dispose(); }
+
+
+  private async postRead(path: '/diskaddr/list' | '/webdisk/member_info', form: FormData) {
+    const url = new URL(path, DOC);
+    url.searchParams.set('sid', this.cookie('wedoc_sid'));
+    url.searchParams.set('wedoc_xsrf', this.cookie('low_login_enable'));
+    let response;
+    try {
+      response = await this.context.post(url.href, { form, headers: { Referer: `${DOC}/`, Accept: 'application/json' }, maxRedirects: 0 });
+    } catch { throw new WecomError('API_ERROR', '企业微信通讯录接口连接失败或超时。', { endpoint: path }); }
+    try {
+      if (response.status() === 401) throw new WecomError('AUTH_EXPIRED', '网页登录态已过期，请重新运行登录助手。');
+      if (response.status() === 403) throw new WecomError('ACCESS_DENIED', '当前账号无权读取该通讯录接口。');
+      if (response.status() >= 300 && response.status() < 400) throw new WecomError('AUTH_REDIRECT', '通讯录接口重定向已被阻止，请重新确认登录态。');
+      if (!response.ok()) throw new WecomError('API_ERROR', '通讯录接口返回 HTTP 错误。', { endpoint: path, http_status: response.status() });
+      if (!response.headers()['content-type']?.includes('application/json')) throw new WecomError('PARSE_ERROR', '通讯录接口返回了非 JSON 内容。', { endpoint: path });
+      const body = parseJson(await response.text(), '通讯录接口响应');
+      const code = body.head?.ret ?? body.retcode;
+      if (code !== 0) throw new WecomError('API_ERROR', '通讯录接口返回业务错误。', { endpoint: path, business_code: code });
+      return body.body || {};
+    } finally { await response.dispose(); }
+  }
+
+  // 通讯录检索：先按姓名/工号/学号搜索 vid，再用 member_info 解析 uid 与展示信息。
+  async searchMembers(input: string, query: string) {
+    const { doc, open } = await this.openDocument(input);
+    const user = open.clientVars.userInfo;
+    requireData(user?.uid && user?.corp_id, '当前登录用户缺少通讯录所需的 uid 或 corp_id。');
+    const selfForm = new FormData();
+    selfForm.set('func', '3'); selfForm.set('docid', doc.id); selfForm.set('f', 'json'); selfForm.set('scene', '111');
+    selfForm.append('id_list', JSON.stringify({ uid: String(user.uid) }));
+    const selfBody = await this.postRead('/webdisk/member_info', selfForm);
+    const selfMember = Array.isArray(selfBody.member) ? selfBody.member[0] : null;
+    requireData(selfMember?.vid, '未能解析当前用户的 vid，无法按通讯录检索。');
+
+    const searchForm = new FormData();
+    searchForm.set('vid', String(selfMember.vid));
+    searchForm.set('corp_id', String(user.corp_id));
+    searchForm.set('func', '5');
+    searchForm.set('search_key', query);
+    const searchBody = await this.postRead('/diskaddr/list', searchForm);
+    const rawMembers = Array.isArray(searchBody.list?.patch_list)
+      ? searchBody.list.patch_list.map((item: Raw) => item?.member || item).filter((item: Raw) => typeof item?.vid === 'string' || typeof item?.vid === 'number')
+      : [];
+    const vids = [...new Set(rawMembers.map((item: Raw) => String(item.vid)))];
+    if (!vids.length) return { matched_by: /^\d+$/.test(query.trim()) ? 'employee_or_student_id' as const : 'name' as const, exact: [], partial: [] };
+
+    const infoForm = new FormData();
+    infoForm.set('func', '3'); infoForm.set('docid', doc.id); infoForm.set('f', 'json'); infoForm.set('scene', '111');
+    for (const vid of vids) infoForm.append('id_list', JSON.stringify({ vid }));
+    const infoBody = await this.postRead('/webdisk/member_info', infoForm);
+    const infos = Array.isArray(infoBody.member) ? infoBody.member : [];
+    const candidates: { namespace: 'wecom_uid'; id: string; name: string; vid: string | null;
+      corp_name: string | null; position: string | null; avatar_url: string | null }[] = infos.filter((info: Raw) => info && !info.invalid && info.uid).map((info: Raw) => ({
+      namespace: 'wecom_uid' as const,
+      id: String(info.uid),
+      name: String(info.name || ''),
+      vid: info.vid ? String(info.vid) : null,
+      corp_name: info.corp_name || null,
+      position: info.position || null,
+      avatar_url: info.avatar || null,
+    }));
+    if (/^\d+$/.test(query.trim())) {
+      return { matched_by: 'employee_or_student_id' as const, exact: candidates, partial: [] };
+    }
+    const normalized = query.trim().normalize('NFC');
+    return {
+      matched_by: 'name' as const,
+      exact: candidates.filter(candidate => candidate.name.trim().normalize('NFC') === normalized),
+      partial: candidates.filter(candidate => candidate.name.trim().normalize('NFC') !== normalized),
+    };
+  }
+
+  async readView(input: string, sheetId: string, viewId: string) {
+    const structure = await this.structure(input, sheetId);
+    const sheet = structure.sheets.find(candidate => candidate.id === sheetId);
+    if (!sheet) throw new WecomError('UNKNOWN_SHEET', '子表 ID 不属于此智能表格或不可读取。', { sheet_id: sheetId });
+    const view = (sheet.view_configs as NormalizedView[]).find(candidate => candidate.id === viewId);
+    if (!view) throw new WecomError('UNKNOWN_VIEW', '视图 ID 不属于此子表或不可读取。', { sheet_id: sheetId, view_id: viewId });
+    return {
+      document_id: structure.document_id, title: structure.title,
+      sheet_id: sheet.id, sheet_name: sheet.name, revision: sheet.revision,
+      view,
+      scope_note: '共享/个人作用域按接口来源区分；个人临时筛选不等于共享视图配置。动态“我”已按 k35=true 写入并回读验证。',
+      limitations: [
+        '筛选连接符与运算符代码已用真实写入确认：连接符 1=and、2=or；运算符 1=eq、3=contains。其他运算符尚未验证。',
+        '未识别的视图设置只列键名，不参与自动覆盖。',
+        '看板分组与卡片字段按视图列解析；未填状态展示的原始配置仍保留为未解析。',
+      ],
+    };
+  }
+
+  // 规划/核对只读取指定子表的结构与记录；人员单元格按保守解析器转为身份引用。
+  async planningContext(input: string, sheetIds?: string[]): Promise<PlanContext> {
+    const structure = await this.structure(input);
+    const requested = sheetIds?.length ? [...new Set(sheetIds)] : structure.sheets.map((sheet: Raw) => sheet.id as string);
+    const known = new Map<string, Raw>(structure.sheets.map((sheet: Raw) => [sheet.id as string, sheet]));
+    const missing = requested.filter(id => !known.has(id));
+    if (missing.length) throw new WecomError('UNKNOWN_SHEET', '计划引用了不存在或不可读取的子表。', { sheet_ids: missing });
+    const sheets: PlanSheet[] = [];
+    for (const sheetId of requested) {
+      const sheet = known.get(sheetId)!;
+      const fields = sheet.field_attributes as NormalizedField[];
+      const userFields = fields.filter(field => field.type === 'USER');
+      const memberCells: Record<string, Record<string, MemberCell>> = {};
+      const recordIds: string[] = [];
+      let offset = 0;
+      let revision: number | null = null;
+      let total: number | null = null;
+      for (;;) {
+        const page = await this.chunk(structure.document_id, sheetId, offset, 200);
+        if (revision === null) { revision = page.revision; total = page.total; }
+        if (page.revision !== revision) throw new WecomError('DOCUMENT_CHANGED', '规划读取期间表格版本变化，请重新读取后再生成计划。', { sheet_id: sheetId });
+        for (const row of page.records) {
+          recordIds.push(row.id);
+          memberCells[row.id] = {};
+          const cells = cellsFor(row.raw);
+          for (const field of userFields) memberCells[row.id][field.id] = parseMemberCell(cells[field.id]);
+        }
+        const next = page.end + 1;
+        if (next >= page.total) break;
+        if (next <= offset) throw new WecomError('INCOMPLETE_DATA', '规划读取分页没有前进。', { sheet_id: sheetId });
+        offset = next;
+      }
+      if (recordIds.length !== total) throw new WecomError('INCOMPLETE_DATA', '规划读取的记录数与子表总数不一致。', {
+        sheet_id: sheetId, expected: total, actual: recordIds.length });
+      sheets.push({
+        id: sheet.id, name: sheet.name, revision: revision!, total_records_in_table: total!,
+        fields, views: sheet.view_configs as NormalizedView[], record_ids: recordIds, member_cells: memberCells,
+      });
+    }
+    return { document_id: structure.document_id, title: structure.title, sheets };
+  }
 }
