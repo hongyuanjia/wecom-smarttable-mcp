@@ -72,7 +72,7 @@ const viewPatch = z.strictObject({
   group: z.array(z.strictObject({ field_id: id, descending: z.boolean().default(false) })).max(3).optional(),
   sort: z.array(z.strictObject({ field_id: id, descending: z.boolean().default(false) })).max(5).optional(),
   hidden_fields: z.array(id).max(500).optional(),
-  field_order: z.array(id).min(1).max(500).optional().describe('必须显式包含全部字段，避免遗漏或残留旧列。'),
+  field_order: z.array(id).min(1).max(500).optional().describe('更新已有视图时必须恰好是当前视图全部列（含隐藏列）的排列，只允许换序，不能增删列或用全表字段补齐；新建视图时表示新视图要包含的列，可选择全表字段的子集。'),
   widths: z.record(id, z.number().int().min(1).max(1000)).optional(),
   frozen_field_count: z.number().int().min(0).max(500).nullable().optional(),
   statistics: z.boolean().nullable().optional().describe('字段统计启用标志（视图 k1.k10），通过 HTTP 3025 写入并回读；省略=保持，null 视为 false（关闭）。该标志不控制底部统计行的显隐，逐列统计未开放。'),
@@ -377,12 +377,12 @@ serveStdio(() => {
         notifyMembers: args.notify_members, updates: args.updates, planId: args.plan_id,
       }, ctx.mcpReq.signal) }), true);
     });
-  server.registerTool('wecom_create_view', { description: '通过 HTTP commitchanges 新建表格/看板等视图，配置 scope（shared 公共 / locked 锁定 / personal 个人）、筛选、排序、分组、列顺序、隐藏列、列宽与看板卡片；支持动态“我”（人员字段 k35=true）。同名视图按规范化配置比较：完全相同返回已有视图且 no_changes=true，配置不同返回 VIEW_CONFIG_DIFF 并要求用 view_id 更新，多个同名返回 VIEW_AMBIGUOUS；不会自动覆盖。',
+  server.registerTool('wecom_create_view', { description: '通过 HTTP commitchanges 新建表格/看板等视图，配置 scope（shared 公共 / locked 锁定 / personal 个人）、筛选、排序、分组、列顺序、隐藏列、列宽与看板卡片；field_order 表示新视图要包含的列，可选择全表字段的子集，与更新已有视图的“只换序”契约分开；支持动态“我”（人员字段 k35=true）。同名视图按规范化配置比较：完全相同返回已有视图且 no_changes=true，配置不同返回 VIEW_CONFIG_DIFF 并要求用 view_id 更新，多个同名返回 VIEW_AMBIGUOUS；不会自动覆盖。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, view: viewPatch.refine(value => Boolean(value.name), '新建视图需要 name。') }) },
     (args, ctx) => run('wecom_create_view', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
       .createView(args.url, args.sheet_id, args.expected_revision, args.view, args.plan_id) }), true));
-  server.registerTool('wecom_update_view', { description: '按 view_id 通过 HTTP 修改视图名称、scope（shared/locked/personal）、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列、字段统计标志（statistics，3025 写入 k1.k10）和看板卡片字段；省略的属性保持原值，filter:null 才表示清除筛选，statistics:null 视为关闭。',
+  server.registerTool('wecom_update_view', { description: '按 view_id 通过 HTTP 修改视图名称、scope（shared/locked/personal）、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列、字段统计标志（statistics，3025 写入 k1.k10）和看板卡片字段；省略的属性保持原值，filter:null 才表示清除筛选，statistics:null 视为关闭。field_order 更新时只表示当前视图全部列（含隐藏列）的排列，只换序、不增删列；新建视图的字段选择另用新建契约。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, view_id: id, patch: viewPatch }) },
     (args, ctx) => run('wecom_update_view', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)

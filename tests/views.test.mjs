@@ -5,6 +5,7 @@ import { normalizeFields } from '../dist/fields.js';
 import { normalizeView, planViewWrite, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, buildViewObject, viewStatisticsMatches } from '../dist/views.js';
 import { compareHiddenFieldSets, compareProtectedWidths, compareRequestedWidths, mergeWidths } from '../dist/view-semantics.js';
 import { mutation } from '../dist/mutations.js';
+import { WecomWriter } from '../dist/writer.js';
 
 const rawFields = {
   k9: 'f_text',
@@ -17,6 +18,18 @@ const rawFields = {
   },
 };
 const fields = normalizeFields(schemaFromRaw(rawFields));
+
+function wideTable(count) {
+  const names = Array.from({ length: count }, (_, index) => `f${String(index + 1).padStart(2, '0')}`);
+  return {
+    names,
+    fields: normalizeFields(schemaFromRaw({
+      k9: names[0],
+      k4: [],
+      k3: Object.fromEntries(names.map((id, index) => [id, { k30: `字段 ${index + 1}`, k31: 1 }])),
+    })),
+  };
+}
 
 function rawView(overrides = {}) {
   return {
@@ -301,7 +314,7 @@ test('视图对象：可见字段顺序、动态“我”、看板分组与卡�
   assert.deepEqual(kanban['1']['7'], [{ '1': 'f_status', '2': false }]);
 
   assert.throws(() => buildViewObject({ ...base, patch: { field_order: ['f_text', 'f_text'] } }),
-    error => error.code === 'UNKNOWN_FIELD');
+    error => error.code === 'INVALID_ARGUMENT' && /重复/.test(error.message));
 });
 
 test('隐藏列从宽度配置 k5.k2 解析，并提供可见列集合', () => {
@@ -450,4 +463,139 @@ test('共享语义层：宽度合并、请求键与受保护键分别比较，�
   assert.deepEqual(compareHiddenFieldSets(['f_text'], ['f_text', 'f_user']), [
     { path: 'hidden_fields.missing.f_user', before: false, after: true },
   ]);
+});
+
+test('更新视图列顺序：29 字段表/16 列视图只重排当前列（含隐藏列），不按全表补齐', () => {
+  const { names, fields: wideFields } = wideTable(29);
+  const columns = names.slice(0, 16);
+  const hidden = ['f04', 'f06', 'f08', 'f10', 'f12', 'f14'];
+  const wideView = normalizeView({
+    k30: 'v_wide', k31: '按人员查看', k32: 1, k33: 0, k34: 'owner_example', k35: 1, k37: [], k38: {},
+    k1: {
+      k1: hidden, k2: columns, k3: 1, k4: 1,
+      k5: Object.fromEntries(columns.map((id, index) => [id, { k1: 120 + index, k2: hidden.includes(id), k3: 0, k4: 0 }])),
+      k6: true, k7: [{ k1: 'f02', k2: false }],
+      k8: { k1: 1, k2: [{ k30: 'f03', k31: 1, k32: 1, k33: 0 }] },
+      k9: [{ k1: 'f01', k2: false }], k10: true, k13: '',
+    },
+  }, wideFields);
+  assert.equal(wideView.columns.length, 16);
+  assert.equal(wideView.hidden_fields.length, 6);
+
+  const reversed = [...columns].reverse();
+  const reordered = planViewWrite({ action: 'update', view_id: 'v_wide',
+    patch: { field_order: reversed }, views: [wideView], fields: wideFields });
+  assert.equal(reordered.decision, 'update');
+  assert.deepEqual(reordered.differences, [{ path: 'columns', before: columns, after: reversed }]);
+  assert.deepEqual(reordered.effective.columns, reversed);
+  // 仅换序：不加入视图外的 13 个字段，隐藏状态、分组、排序、筛选保持原值。
+  assert.equal(reordered.effective.columns.some(id => names.slice(16).includes(id)), false);
+  assert.deepEqual(reordered.effective.hidden_fields, wideView.hidden_fields);
+  assert.deepEqual(reordered.effective.group, [{ field_id: 'f02', descending: false }]);
+  assert.deepEqual(reordered.effective.sort, [{ field_id: 'f01', descending: false }]);
+  assert.deepEqual(reordered.effective.filter, wideView.filter && { present: true });
+
+  // 正确顺序重复提交无差异、不产生写入。
+  const repeated = planViewWrite({ action: 'update', view_id: 'v_wide',
+    patch: { field_order: columns }, views: [wideView], fields: wideFields });
+  assert.equal(repeated.decision, 'skip');
+  assert.deepEqual(repeated.differences, []);
+});
+
+test('更新视图列顺序校验：29 列替换 16 列、重复、未知、遗漏与混入其他表均拒绝并带当前列信息', () => {
+  const { names, fields: wideFields } = wideTable(29);
+  const columns = names.slice(0, 16);
+  const wideView = normalizeView({
+    k30: 'v_wide', k31: '按人员查看', k32: 1, k33: 0, k34: 'owner_example', k35: 1, k37: [], k38: {},
+    k1: { k1: [], k2: columns, k3: 1, k4: 1,
+      k5: Object.fromEntries(columns.map((id, index) => [id, { k1: 120 + index, k2: false }])),
+      k6: true, k7: [], k8: { k1: 0, k2: [] }, k9: [], k10: true, k13: '' },
+  }, wideFields);
+  const update = field_order => planViewWrite({ action: 'update', view_id: 'v_wide',
+    patch: { field_order }, views: [wideView], fields: wideFields });
+
+  assert.throws(() => update(names), error => {
+    assert.equal(error.code, 'INVALID_ARGUMENT');
+    assert.deepEqual(error.details.current_columns, columns);
+    assert.equal(error.details.current_column_count, 16);
+    assert.equal(error.details.submitted_column_count, 29);
+    assert.deepEqual(error.details.extra_columns, names.slice(16));
+    assert.deepEqual(error.details.missing_columns, []);
+    return true;
+  });
+  assert.throws(() => update([...columns, 'f01']),
+    error => error.code === 'INVALID_ARGUMENT' && /重复/.test(error.message));
+  assert.throws(() => update([...columns.slice(1), 'f_other_table']),
+    error => error.code === 'UNKNOWN_FIELD' && error.details.field_id === 'f_other_table');
+  assert.throws(() => update(columns.slice(1)), error => {
+    assert.equal(error.code, 'INVALID_ARGUMENT');
+    assert.deepEqual(error.details.missing_columns, [columns[0]]);
+    return true;
+  });
+});
+
+test('新建视图字段选择与更新列顺序契约分开：新建可选子集，更新必须覆盖当前列', () => {
+  const subset = ['f_text', 'f_user'];
+  const created = planViewWrite({ action: 'create', patch: { name: '部分字段视图', field_order: subset },
+    views: [], fields });
+  assert.equal(created.decision, 'create');
+  assert.deepEqual(created.effective.columns, subset);
+
+  const existing = normalizeView(rawView(), fields);
+  assert.throws(() => planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { field_order: subset }, views: [existing], fields }), error => {
+    assert.equal(error.code, 'INVALID_ARGUMENT');
+    assert.deepEqual(error.details.missing_columns, ['f_status']);
+    return true;
+  });
+});
+
+test('执行器复用更新列顺序契约：正确排列不写入，29 列替换/重复/遗漏在提交前拒绝且零写入', async () => {
+  const { names, fields: wideFields } = wideTable(29);
+  const columns = names.slice(0, 16);
+  const hidden = ['f04', 'f06', 'f08'];
+  const rawViewData = {
+    k30: 'v_wide', k31: '按人员查看', k32: 1, k33: 0, k34: 'owner_example', k35: 1, k37: [], k38: {},
+    k1: {
+      k1: hidden, k2: columns, k3: 1, k4: 1,
+      k5: Object.fromEntries(columns.map((id, index) => [id, { k1: 120 + index, k2: hidden.includes(id) }])),
+      k6: true, k7: [], k8: { k1: 0, k2: [] }, k9: [], k10: false, k13: '',
+    },
+  };
+  const rawSchema = {
+    k9: names[0], k4: [rawViewData],
+    k3: Object.fromEntries(names.map((id, index) => [id, { k30: `字段 ${index + 1}`, k31: 1 }])),
+  };
+  const schema = schemaFromRaw(rawSchema);
+  const chunk = { revision: 7, sheetId: 't_wide', records: [], total: 0, start: 0, end: 0, schema };
+  const posts = [];
+  const client = {
+    context: { post: async (...args) => { posts.push(args); throw new Error('unexpected write'); }, dispose: async () => {} },
+    cookie: () => 'token_example',
+    openDocument: async () => ({
+      doc: { id: 'doc_example' },
+      open: { clientVars: {
+        privilegeAttribute: { can_edit: 1 },
+        collab_client_vars: { dver: 'dver_example', pver: 1 },
+        uin: 'u_example', userInfo: { fullName: '示例用户', corp_id: 1 }, optimizedVer: 4,
+      } },
+      directory: [{ id: 't_wide', type: 'smartsheet' }],
+    }),
+    chunk: async () => chunk,
+    schema: async () => schema,
+  };
+  const writer = new WecomWriter(client, new AbortController().signal);
+
+  const noop = await writer.updateView('https://doc.example/smartsheet/s3_example', 't_wide', 7, 'v_wide',
+    { field_order: columns });
+  assert.equal(noop.status, 'verified');
+  assert.equal(noop.no_changes, true);
+  assert.equal(noop.revision, 7);
+  assert.equal(posts.length, 0);
+
+  for (const field_order of [names, [...columns, 'f01'], columns.slice(1), [...columns.slice(1), 'f_other_table']]) {
+    await assert.rejects(() => writer.updateView('https://doc.example/smartsheet/s3_example', 't_wide', 7, 'v_wide',
+      { field_order }), error => ['INVALID_ARGUMENT', 'UNKNOWN_FIELD'].includes(error.code));
+  }
+  assert.equal(posts.length, 0, '校验失败不得发出任何写请求');
 });

@@ -294,3 +294,82 @@ test('核对：11 视图隐藏列乱序与局部列宽补丁从误报 pending �
   assert.equal(result.summary.pending, 0);
   assert.equal(result.status, 'verified');
 });
+
+test('29 字段表、16 列视图：16 列排列完成 plan → 回读 → verify，重复执行无变化', () => {
+  const names = Array.from({ length: 29 }, (_, index) => `w${String(index + 1).padStart(2, '0')}`);
+  const wideFields = normalizeFields(schemaFromRaw({
+    k9: names[0], k4: [],
+    k3: Object.fromEntries(names.map((id, index) => [id, { k30: `字段 ${index + 1}`, k31: 1 }])),
+  }), ['t_wide']);
+  const columns = names.slice(0, 16);
+  const hidden = ['w04', 'w06', 'w08', 'w10', 'w12', 'w14'];
+  const raw = {
+    k30: 'v_wide', k31: '按人员查看', k32: 1, k33: 0, k34: 'owner', k35: 1, k37: [], k38: {},
+    k1: {
+      k1: hidden, k2: columns, k3: 1, k4: 1,
+      k5: Object.fromEntries(columns.map((id, index) => [id, { k1: 120 + index, k2: hidden.includes(id) }])),
+      k6: true, k7: [{ k1: 'w02', k2: false }], k8: { k1: 0, k2: [] },
+      k9: [{ k1: 'w01', k2: false }], k10: false, k13: '',
+    },
+  };
+  const sheet = {
+    id: 't_wide', name: '人员具体分工', revision: 7, total_records_in_table: 149,
+    fields: wideFields, views: [normalizeView(raw, wideFields)], record_ids: [], member_cells: {},
+  };
+  const wideContext = { document_id: 'doc_example', title: '示例文档', sheets: [sheet] };
+  const reordered = [...columns].reverse();
+  const change = { kind: 'view', action: 'update', sheet_id: 't_wide', view_id: 'v_wide',
+    patch: { field_order: reordered } };
+
+  const plan = planChanges(wideContext, [change]);
+  assert.equal(plan.status, 'ready');
+  assert.equal(plan.executable, true);
+  assert.equal(plan.actions[0].decision, 'update');
+  assert.deepEqual(plan.actions[0].differences, [{ path: 'columns', before: columns, after: reordered }]);
+
+  const afterRaw = { ...raw, k1: { ...raw.k1, k2: reordered } };
+  const afterContext = { ...wideContext, sheets: [{ ...sheet, revision: 8, views: [normalizeView(afterRaw, wideFields)] }] };
+  const verification = verifyChanges(afterContext, [change]);
+  assert.equal(verification.status, 'verified');
+  assert.equal(verification.actions[0].status, 'verified');
+  assert.deepEqual(verification.actions[0].differences, []);
+  const afterView = afterContext.sheets[0].views[0];
+  assert.deepEqual(afterView.columns, reordered);
+  assert.deepEqual(afterView.hidden_fields, hidden);
+  assert.equal(afterView.columns.some(id => names.slice(16).includes(id)), false);
+
+  const repeated = planChanges(afterContext, [change]);
+  assert.equal(repeated.actions[0].decision, 'skip');
+  assert.deepEqual(repeated.actions[0].differences, []);
+  assert.equal(repeated.summary.skip, 1);
+  assert.equal(repeated.executable, true);
+});
+
+test('计划阶段拒绝 29 列替换 16 列视图，零写入并返回当前视图列', () => {
+  const names = Array.from({ length: 29 }, (_, index) => `w${String(index + 1).padStart(2, '0')}`);
+  const wideFields = normalizeFields(schemaFromRaw({
+    k9: names[0], k4: [],
+    k3: Object.fromEntries(names.map((id, index) => [id, { k30: `字段 ${index + 1}`, k31: 1 }])),
+  }), ['t_wide']);
+  const columns = names.slice(0, 16);
+  const sheet = {
+    id: 't_wide', name: '人员具体分工', revision: 7, total_records_in_table: 149, fields: wideFields,
+    views: [normalizeView({
+      k30: 'v_wide', k31: '按人员查看', k32: 1, k33: 0, k34: 'owner', k35: 1, k37: [], k38: {},
+      k1: { k1: [], k2: columns, k3: 1, k4: 1,
+        k5: Object.fromEntries(columns.map((id, index) => [id, { k1: 120 + index, k2: false }])),
+        k6: true, k7: [], k8: { k1: 0, k2: [] }, k9: [], k10: false, k13: '' },
+    }, wideFields)],
+    record_ids: [], member_cells: {},
+  };
+  const plan = planChanges({ document_id: 'doc_example', title: '示例文档', sheets: [sheet] }, [
+    { kind: 'view', action: 'update', sheet_id: 't_wide', view_id: 'v_wide', patch: { field_order: names } },
+  ]);
+  assert.equal(plan.actions[0].decision, 'invalid');
+  assert.equal(plan.executable, false);
+  assert.equal(plan.status, 'blocked');
+  const error = plan.actions[0].errors[0];
+  assert.equal(error.code, 'INVALID_ARGUMENT');
+  assert.deepEqual(error.details.current_columns, columns);
+  assert.deepEqual(error.details.extra_columns, names.slice(16));
+});
