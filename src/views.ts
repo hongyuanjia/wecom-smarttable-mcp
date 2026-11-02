@@ -283,7 +283,8 @@ function validateFieldList(ids: string[], fields: Map<string, NormalizedField>, 
 }
 
 function comparableFilter(filter: NormalizedView['filter']) {
-  if (!filter) return null;
+  // 空 conditions 与未设置筛选语义相同：服务端会把清除后的筛选保留为 {conjunction, conditions: []}。
+  if (!filter || !filter.conditions.length) return null;
   return {
     conjunction: filter.conjunction,
     conditions: filter.conditions.map(condition => ({
@@ -329,7 +330,7 @@ function rawViewFromBuilt(built: Raw): Raw {
     if (item[String(type)] !== undefined) mapped[`k${type}`] = item[String(type)];
     return mapped;
   };
-  const placement = (items: Raw[] | undefined) => (items || []).map(item => ({ k1: item['1'], k2: item['2'] }));
+  const rawPlacement = (items: Raw[] | undefined) => (items || []).map(item => ({ k1: item['1'], k2: item['2'] }));
   return {
     k30: built['30'], k31: built['31'], k32: built['32'], k33: built['33'], k34: built['34'], k35: built['35'],
     k1: {
@@ -337,9 +338,9 @@ function rawViewFromBuilt(built: Raw): Raw {
       k5: Object.fromEntries(Object.entries(properties['5'] || {}).map(([id, info]: [string, any]) =>
         [id, { k1: info['1'], k2: info['2'] }])),
       k6: properties['6'],
-      k7: placement(properties['7']),
+      k7: rawPlacement(properties['7']),
       k8: properties['8'] ? { k1: properties['8']['1'], k2: (properties['8']['2'] || []).map(condition) } : null,
-      k9: placement(properties['9']),
+      k9: rawPlacement(properties['9']),
       k10: properties['10'],
     },
   };
@@ -525,6 +526,11 @@ export function encodeViewStatistics(enabled: boolean | null): Raw {
   return { '1': enabled === true };
 }
 
+// 3025 的回读只核对 k1.k10；同一次调用中的其他步骤各自核对，不能拿整体 config_digest 比较。
+export function viewStatisticsMatches(rawView: Raw, enabled: boolean): boolean {
+  return rawView[`k${rawView.k32}`]?.k10 === enabled;
+}
+
 export function encodeViewSort(items: { field_id: string; descending?: boolean }[]): Raw[] {
   return items.map(item => ({ '1': item.field_id, '2': Boolean(item.descending) }));
 }
@@ -586,7 +592,7 @@ export function buildViewObject(input: {
       '1': input.recordIds, '2': columns, '3': 1, '4': 1,
       '5': Object.fromEntries(columns.map(id => [id, { '1': widths[id], '2': false }])),
       '6': true, '7': group, '8': encodeViewFilter(input.patch.filter ?? null, input.fields),
-      '9': encodeViewSort(input.patch.sort || []), '10': false,
+      '9': encodeViewSort(input.patch.sort || []), '10': input.patch.statistics === true,
       '11': { '1': 0, '2': '', '3': '', '4': '', '5': true, '6': 2, '7': [], '8': [] },
       '12': null,
     },

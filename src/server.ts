@@ -19,6 +19,7 @@ import { createRequire } from 'node:module';
 process.umask(0o077);
 const { version } = createRequire(import.meta.url)('../package.json');
 const id = z.string().min(1).max(256).regex(/^[A-Za-z0-9_-]+$/);
+const planId = z.string().regex(/^[a-f0-9]{64}$/);
 const url = z.string().max(4096).describe('当前用户可访问的 https://doc.weixin.qq.com/smartsheet/ 链接。');
 const assetIdentity = { document_id: id, sheet_id: id, record_id: id, field_id: id, asset_id: z.string().min(1).max(1024) };
 const locator = z.union([
@@ -32,7 +33,7 @@ const cell = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z
 const values = z.record(id, cell).refine(value => Object.keys(value).length <= 500, '单条记录最多 500 个字段。');
 const valuesDescription = '字段 ID 到单元格值的映射。支持文本/电话/邮箱字符串、数字、布尔值、毫秒时间戳、0–1 进度、已有选项 ID 数组，null 清空；不支持图片/附件、人员、URL、关联和派生字段。';
 const tableChange = { url, sheet_id: id, expected_revision: revision,
-  plan_id: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('可选：关联的本地计划 ID；写入执行日志会记录并按计划筛选。'),
+  plan_id: planId.optional().describe('可选：关联的本地计划 ID；写入执行日志会记录并按计划筛选。'),
 };
 const includeTextFragments = z.boolean().optional().describe('默认 false，省略原始富文本片段以减少返回量；需片段时设 true，后续页省略则沿用游标设置。');
 
@@ -144,8 +145,6 @@ const planChange = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('formula_field'), action: z.enum(['create', 'update']), sheet_id: id,
     field_id: id.optional(), name: z.string().trim().min(1).max(128).optional(), formula: formulaDefinition }),
 ]);
-const planId = z.string().regex(/^[a-f0-9]{64}$/);
-
 function referencedSheetIds(changes: PlanChange[]): string[] {
   const ids = new Set<string>();
   for (const change of changes) {
@@ -220,7 +219,7 @@ serveStdio(() => {
   server.registerTool('wecom_upload_asset', { description: '把本机文件上传到图片/附件字段并写入记录单元格，按文件名、大小、MD5 和文件标识回读核对；单文件不超过 50 MiB。',
     annotations: { ...writeAnnotations, destructiveHint: false },
     inputSchema: z.strictObject({ url, sheet_id: id, expected_revision: revision, field_id: id, record_id: id,
-      plan_id: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('可选：关联的本地计划 ID。'),
+      plan_id: planId.optional().describe('可选：关联的本地计划 ID。'),
       file_path: z.string().trim().min(1).max(4096).describe('本机文件路径。'),
       view_id: id.optional().describe('上传定位视图；省略时自动选择包含该字段的视图。') }) },
     (args, ctx) => run('wecom_upload_asset', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
@@ -248,19 +247,22 @@ serveStdio(() => {
     (args, ctx) => run('wecom_delete_fields', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).deleteFields(args.url, args.sheet_id, args.expected_revision, args.field_ids, args.plan_id) }), true));
   server.registerTool('wecom_create_sheet', { description: '在现有文档中通过 HTTP 3001 新建一个智能表子表，并回读核对名称与 ID；新表使用企业微信默认字段。',
     annotations: { ...writeAnnotations, destructiveHint: false },
-    inputSchema: z.strictObject({ url, expected_revision: revision, title: z.string().trim().min(1).max(128) }) },
+    inputSchema: z.strictObject({ url, expected_revision: revision, plan_id: planId.optional().describe('可选：关联的本地计划 ID；写入执行日志会记录并按计划筛选。'),
+      title: z.string().trim().min(1).max(128) }) },
     (args, ctx) => run('wecom_create_sheet', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .createSheet(args.url, args.title, args.expected_revision) }), true));
+      .createSheet(args.url, args.title, args.expected_revision, args.plan_id) }), true));
   server.registerTool('wecom_rename_sheet', { description: '通过 HTTP 3004 重命名现有子表，并回读核对。',
     annotations: writeAnnotations,
-    inputSchema: z.strictObject({ url, sheet_id: id, expected_revision: revision, title: z.string().trim().min(1).max(128) }) },
+    inputSchema: z.strictObject({ url, sheet_id: id, expected_revision: revision, plan_id: planId.optional().describe('可选：关联的本地计划 ID；写入执行日志会记录并按计划筛选。'),
+      title: z.string().trim().min(1).max(128) }) },
     (args, ctx) => run('wecom_rename_sheet', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .renameSheet(args.url, args.sheet_id, args.expected_revision, args.title) }), true));
+      .renameSheet(args.url, args.sheet_id, args.expected_revision, args.title, args.plan_id) }), true));
   server.registerTool('wecom_delete_sheet', { description: '通过 HTTP 3002 删除指定子表及其中数据；必须 confirm=true，至少保留一个子表。',
     annotations: writeAnnotations,
-    inputSchema: z.strictObject({ url, sheet_id: id, expected_revision: revision, confirm: z.literal(true).describe('确认删除整个子表；不可撤销。') }) },
+    inputSchema: z.strictObject({ url, sheet_id: id, expected_revision: revision, plan_id: planId.optional().describe('可选：关联的本地计划 ID；写入执行日志会记录并按计划筛选。'),
+      confirm: z.literal(true).describe('确认删除整个子表；不可撤销。') }) },
     (args, ctx) => run('wecom_delete_sheet', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .deleteSheet(args.url, args.sheet_id, args.expected_revision) }), true));
+      .deleteSheet(args.url, args.sheet_id, args.expected_revision, args.plan_id) }), true));
   server.registerTool('wecom_delete_table', { description: '仅在用户明确要求删除整份表格时调用。通过 URL 或 document_id 定位（同时提供须一致），不按标题匹配；只移入回收站，不永久删除。结果未知时传 check_only:true 查询状态；返回 active 仅代表当前仍可访问，异步删除可能尚未完成，勿盲目重复提交。',
     annotations: writeAnnotations, inputSchema: z.strictObject({ url: url.optional(), document_id: id.optional(), check_only: z.boolean().describe('只读核对当前状态，不提交删除。').default(false) })
       .refine(args => Boolean(args.url || args.document_id), '需要 URL 或 document_id。') },
@@ -453,7 +455,7 @@ serveStdio(() => {
   // ---- 本地计划与线上回读核对 ----
   server.registerTool('wecom_list_executions', { description: '读取本机执行日志：每次已提交的 HTTP 写入都会记录 execution_id、时间、文档/子表、操作、版本、可选 plan_id 和 verified/not_verified 状态；可按 document_id 和 plan_id 过滤。每个文档默认保留最近 1000 条（可用 WECOM_MCP_EXECUTION_RETENTION 调整），保存时清理最旧条目。日志只含对象 ID 和版本，不含 Cookie、Token 或签名链接。',
     annotations,
-    inputSchema: z.strictObject({ document_id: id.optional(), plan_id: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    inputSchema: z.strictObject({ document_id: id.optional(), plan_id: planId.optional(),
       limit: z.number().int().min(1).max(200).default(50) }) },
     (args, ctx) => run('wecom_list_executions', args, ctx, async () => {
       const executions = await listExecutions(args.document_id, args.limit, args.plan_id);

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { schemaFromRaw } from '../dist/protocol.js';
 import { normalizeFields } from '../dist/fields.js';
-import { normalizeView, planViewWrite, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, buildViewObject } from '../dist/views.js';
+import { normalizeView, planViewWrite, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, buildViewObject, viewStatisticsMatches } from '../dist/views.js';
 import { mutation } from '../dist/mutations.js';
 
 const rawFields = {
@@ -86,6 +86,60 @@ test('直接创建同名视图复用配置比较：相同跳过、不同给差�
   assert.throws(() => compareCreateView({ patch, views: [existing, other], fields }),
     error => error.code === 'VIEW_AMBIGUOUS');
   assert.equal(compareCreateView({ patch: { ...patch, name: '新视图' }, views: [existing], fields }), null);
+});
+
+test('直接创建同名视图比较统计标志：请求 true 与已有 true 跳过，与已有 false 冲突', () => {
+  const patch = { name: '我的职责', type: 'grid',
+    field_order: ['f_text', 'f_user', 'f_status'],
+    widths: { f_text: 280, f_user: 160, f_status: 140 },
+    group: [{ field_id: 'f_status' }], sort: [{ field_id: 'f_text' }], statistics: true };
+  const existingRaw = statistics => ({
+    k30: 'v_stats', k31: '我的职责', k32: 1, k33: 2, k34: 'owner_example', k35: 1,
+    k1: {
+      k1: [], k2: ['f_text', 'f_user', 'f_status'], k3: 1, k4: 1,
+      k5: { f_text: { k1: 280, k2: false }, f_user: { k1: 160, k2: false }, f_status: { k1: 140, k2: false } },
+      k6: true, k7: [{ k1: 'f_status', k2: false }], k8: null,
+      k9: [{ k1: 'f_text', k2: false }], k10: statistics, k13: '',
+    },
+  });
+
+  const same = compareCreateView({ patch, views: [normalizeView(existingRaw(true), fields)], fields });
+  assert.equal(same.decision, 'skip');
+  assert.deepEqual(same.differences, []);
+
+  const conflict = compareCreateView({ patch, views: [normalizeView(existingRaw(false), fields)], fields });
+  assert.equal(conflict.decision, 'conflict');
+  assert.deepEqual(conflict.differences, [{ path: 'statistics', before: false, after: true }]);
+});
+
+test('同名视图比较：已有空筛选条件与未设置筛选等价', () => {
+  const patch = { name: '我的职责', type: 'grid',
+    field_order: ['f_text', 'f_user', 'f_status'],
+    widths: { f_text: 280, f_user: 160, f_status: 140 },
+    group: [{ field_id: 'f_status' }], sort: [{ field_id: 'f_text' }], statistics: false };
+  const existing = normalizeView({
+    k30: 'v_empty_filter', k31: '我的职责', k32: 1, k33: 2, k34: 'owner_example', k35: 1,
+    k1: {
+      k1: [], k2: ['f_text', 'f_user', 'f_status'], k3: 1, k4: 1,
+      k5: { f_text: { k1: 280, k2: false }, f_user: { k1: 160, k2: false }, f_status: { k1: 140, k2: false } },
+      k6: true, k7: [{ k1: 'f_status', k2: false }], k8: { k1: 1, k2: [] },
+      k9: [{ k1: 'f_text', k2: false }], k10: false, k13: '',
+    },
+  }, fields);
+  assert.equal(existing.filter.present, true);
+  assert.deepEqual(existing.filter.conditions, []);
+
+  const comparison = compareCreateView({ patch, views: [existing], fields });
+  assert.equal(comparison.decision, 'skip');
+  assert.deepEqual(comparison.differences, []);
+});
+
+test('统计校验只看 k10，不因同次调用修改其他视图设置而失败', () => {
+  const changed = { ...rawView({ k10: true }), k31: '同步改名' };
+  changed.k1 = { ...changed.k1, k4: 2, k8: { k1: 1, k2: [{ k30: 'f_text', k31: 1, k32: 3, k1: '区县' }] } };
+  assert.equal(viewStatisticsMatches(changed, true), true);
+  assert.equal(viewStatisticsMatches(changed, false), false);
+  assert.equal(viewStatisticsMatches({ ...changed, k1: { ...changed.k1, k10: false } }, false), true);
 });
 
 test('同名校验：唯一且无差异跳过，同名不同配置给差异，多个同名必须用 ID', () => {
