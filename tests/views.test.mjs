@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { schemaFromRaw } from '../dist/protocol.js';
 import { normalizeFields } from '../dist/fields.js';
-import { normalizeView, planViewWrite, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, buildViewObject } from '../dist/views.js';
+import { normalizeView, planViewWrite, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, buildViewObject } from '../dist/views.js';
+import { mutation } from '../dist/mutations.js';
 
 const rawFields = {
   k9: 'f_text',
@@ -129,6 +130,39 @@ test('补丁语义：省略保持、null 清除、空条件拒绝，动态“我
   assert.throws(() => planViewWrite({ action: 'create', patch: { name: '错误动态', filter: { conjunction: 'and',
     conditions: [{ field_id: 'f_text', operator: 'contains', value_kind: 'current_viewer' }] } }, views: [], fields }),
   error => error.code === 'INVALID_ARGUMENT');
+});
+
+test('视图统计标志：3025 mutation 形状固定，null 归一化为关闭', () => {
+  // 抓包帧：[[{"t":3025,"v":5,"c":{"1":"s_test","2":"v_test","3":{"1":true}},"r":29,"o":0}]]
+  // r 由提交信封填充；本地 mutation 统一使用 -1 占位。
+  assert.deepEqual(mutation(3025, { '1': 's_test', '2': 'v_test', '3': encodeViewStatistics(true) }),
+    { t: 3025, v: 5, c: { '1': 's_test', '2': 'v_test', '3': { '1': true } }, r: -1, o: 0 });
+  assert.deepEqual(encodeViewStatistics(false), { '1': false });
+  // k10 只有布尔状态；null 不能写回，统一解释为关闭。
+  assert.deepEqual(encodeViewStatistics(null), { '1': false });
+
+  const existingOn = normalizeView(rawView(), fields);
+  const disable = planViewWrite({ action: 'update', view_id: 'v_mine', patch: { statistics: null }, views: [existingOn], fields });
+  assert.equal(disable.decision, 'update');
+  assert.equal(disable.effective.statistics, false);
+  assert.deepEqual(disable.differences, [{ path: 'statistics', before: true, after: false }]);
+
+  const existingOff = normalizeView(rawView({ k10: false }), fields);
+  const noop = planViewWrite({ action: 'update', view_id: 'v_mine', patch: { statistics: null }, views: [existingOff], fields });
+  assert.equal(noop.decision, 'skip');
+  assert.deepEqual(noop.differences, []);
+});
+
+test('视图统计标志改变只影响 statistics_enabled，其余配置摘要保持稳定', () => {
+  const enabled = normalizeView(rawView({ k10: true }), fields);
+  const disabled = normalizeView(rawView({ k10: false }), fields);
+  assert.equal(enabled.statistics_enabled, true);
+  assert.equal(disabled.statistics_enabled, false);
+  assert.notEqual(enabled.config_digest, disabled.config_digest);
+  const configWithoutStatistics = ({ config_digest: _digest, raw_digest: _raw, statistics_enabled: _statistics, ...rest }) => rest;
+  for (const key of Object.keys(configWithoutStatistics(enabled))) {
+    assert.deepEqual(configWithoutStatistics(disabled)[key], configWithoutStatistics(enabled)[key], key);
+  }
 });
 
 test('视图配置校验：未知字段、重复字段、列宽越界和不完整列顺序均拒绝', () => {

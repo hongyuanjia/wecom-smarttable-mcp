@@ -10,7 +10,7 @@ import { parseDocumentRole, parseRecyclePage } from './document-protocol.js';
 import { acknowledgedClears, addColumnMutations, appendRank, columnViewsMatch, deleteColumnMutations, memberUpdateMutations, mutation, newId, uniqueIds, updateMutations, valuesMatch,
   type CellValue, type ColumnInput, type MemberChange, type Mutation, type RecordInput } from './mutations.js';
 import { cellsFor, parseDerivedResult } from './protocol.js';
-import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, normalizeView, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
+import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, normalizeView, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
 import { normalizeFields } from './fields.js';
 import { formulaFieldMutations, formulaFormatter, formulaFormatterMatches, lookupFieldMutations, relationFieldMutations, type FormulaFormatSpec, type LookupSpec, type RelationSpec } from './field-writer.js';
 import { assertFormulaDefinition, encodeProviderFormula, unsupportedProviderCalls, type FormulaExpression } from './formulas.js';
@@ -610,9 +610,21 @@ export class WecomWriter {
         return Object.entries(patch.widths!).every(([id, width]) => widths[id]?.k1 === width);
       } });
     }
-    if (patch.statistics !== undefined && patch.statistics !== (rawViewProperties(raw).k10 === true)) {
-      // 网页端没有可验证的统计行开关入口；读配置可用，写入保持拒绝。
-      throw new WecomError('UNSUPPORTED_VIEW_CHANGE', '统计显示切换尚未找到可验证的写入路径；当前只读取该设置。');
+    if (patch.statistics !== undefined) {
+      // 3025 写 k10（字段统计启用标志，不是底部统计行显隐）；null 归一化为关闭。
+      const desired = encodeViewStatistics(patch.statistics)['1'];
+      if (desired !== (properties.k10 === true)) {
+        // 只改 k10；用规范化摘要核对其他设置未被覆盖，并保持 config_digest 算法不变。
+        const expectedDigest = normalizeView({ ...raw, [`k${raw.k32}`]: { ...properties, k10: desired } },
+          normalizedFields).config_digest;
+        changes.push({ commands: [mutation(3025, { '1': sheetId, '2': viewId, '3': encodeViewStatistics(desired) })],
+          verify: schema => {
+            const actual = currentView(schema);
+            if (!actual) return false;
+            return rawViewProperties(actual).k10 === desired
+              && normalizeView(actual, normalizedFields).config_digest === expectedDigest;
+          } });
+      }
     }
     if (patch.frozen_field_count !== undefined) {
       const count = patch.frozen_field_count ?? 0;

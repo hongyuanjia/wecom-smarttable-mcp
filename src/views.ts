@@ -458,7 +458,8 @@ export function planViewWrite(input: {
     }
     effective.frozen_field_count = patch.frozen_field_count;
   } else effective.frozen_field_count = existing?.frozen_field_count ?? null;
-  if (patch.statistics !== undefined) effective.statistics = patch.statistics;
+  // k10 只有布尔状态；null 不能写回，统一解释为关闭，避免计划与实际写入语义分叉。
+  if (patch.statistics !== undefined) effective.statistics = patch.statistics === null ? false : patch.statistics;
   else effective.statistics = existing?.statistics_enabled ?? null;
   if (patch.kanban !== undefined) {
     if (patch.kanban.retains_empty_group !== true) {
@@ -517,6 +518,11 @@ export const VIEW_TYPE_CODES: Record<string, number> = {
 
 export function encodeViewGroup(items: { field_id: string; descending?: boolean }[]): Raw[] {
   return items.map(item => ({ '1': item.field_id, '2': Boolean(item.descending) }));
+}
+
+// 3025 c.3：k10 是“字段统计启用”标志，不是底部统计行显隐；null 视为关闭。
+export function encodeViewStatistics(enabled: boolean | null): Raw {
+  return { '1': enabled === true };
 }
 
 export function encodeViewSort(items: { field_id: string; descending?: boolean }[]): Raw[] {
