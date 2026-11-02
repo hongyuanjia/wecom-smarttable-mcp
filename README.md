@@ -50,7 +50,7 @@ npm ci
 npm run build
 ```
 
-构建会同时生成 `dist/build-info.json`：`build_commit`（可用 `WECOM_BUILD_COMMIT` 覆盖）、由入口/协议/视图/写入/计划模块哈希计算的 `build_id`、`output_schema_version` 与 `derived_parser_version`。启动后 `wecom_capabilities` 的 `build` 字段返回该清单，并核对当前进程入口文件哈希；`running.matches_build=false` 表示运行文件与构建清单不一致。
+构建会同时生成 `dist/build-info.json`：`build_commit`（可用 `WECOM_BUILD_COMMIT` 覆盖）、由入口/协议/视图/视图语义/写入/计划模块哈希计算的 `build_id`、`output_schema_version` 与 `derived_parser_version`。启动后 `wecom_capabilities` 的 `build` 字段返回该清单，并核对当前进程入口文件哈希；`running.matches_build=false` 表示运行文件与构建清单不一致。
 
 接入后直接向客户端提供链接即可，首次登录同样由 MCP 自动引导。如果需要在终端手动排查，或者客户端不支持表单交互，可执行：
 

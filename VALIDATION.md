@@ -189,11 +189,11 @@ URL 校验采用精确域名匹配：第一方鉴权下载仅允许已验证的�
 - 业务文档新增 `年度事项完成率`（子任务实施安排 `fRrFq3`）：`IF(年度事项数=0,"",已完成事项数/年度事项数)`，百分数格式；19 条记录逐条核对，当前均为 0%，与已完成事项数=0 一致。四表版本 433，记录数 9/19/149/100，成员 296/296、关联 337/337、完成率 19/19。
 - 已知限制：文本字段 `COUNTIF` 服务端报 errorType 4，`COALESCE`/`PERCENT` 服务端报 errorType 8「不识别的内容」，均在写入前拒绝；关联/双向关联只能按被关联记录标题文本筛选和 empty/not_empty，不能按记录 ID 过滤；逐列统计 3019 的持久化读写不在本轮范围；个人视图的跨账号可见性、动态“我”的其他账号实际筛选结果仍需人工核对；年度表 100 条日期/状态源数据为空，公式当前均为“待确定日期”。
 - 本轮同步校验：版本 `0.9.0`，MCP 工具 33 个；`npm run check`、**103 项**离线测试、`npm run check:public` 全部通过。
-- `invalid_json` 诊断：派生字段解析失败时返回 `parse_error` 与 `parse_diagnostics`（读取路径、revision、文档/子表/字段、来源、原始值类型/长度/SHA-256、失败位置和构建标识）；默认不保存原文，只有显式设置 `WECOM_MCP_DIAGNOSTICS=1` 才输出限长脱敏片段。合成坏 JSON 用例覆盖诊断形状、默认脱敏、片段上限和敏感字段排除；真实历史失败输入尚未捕获，历史原因待复现。本轮只读 live 探测因企业微信接口连接失败未取得样本，未写入业务文档。`npm run check`、**136 项**离线测试、`npm run check:public` 全部通过。
+- `invalid_json` 诊断：派生字段解析失败时返回 `parse_error` 与 `parse_diagnostics`（读取路径、revision、文档/子表/字段、来源、原始值类型/长度/SHA-256、失败位置和构建标识）；默认不保存原文，只有显式设置 `WECOM_MCP_DIAGNOSTICS=1` 才输出限长脱敏片段。合成坏 JSON 用例覆盖诊断形状、默认脱敏、片段上限和敏感字段排除；真实历史失败输入尚未捕获，历史原因待复现。本轮只读 live 探测因企业微信接口连接失败未取得样本，未写入业务文档。`npm run check`、**143 项**离线测试、`npm run check:public` 全部通过。
 
 ## 0.9.0 读取与核验兼容修复集成（2026-11-02）
 
-对应《智能表格 MCP 读取与核验兼容问题修复说明-20261102》R1/R2/R4/R5 与 D1。集成分支 `spec/compat-read-verify-20261102`，提交 `a29ba0cad4a8088dafd10eaa973d32a92e47deeb`，包版本仍为 `0.9.0`。本轮只改读取、计划、回读和核验语义，业务文档未写入。
+对应《智能表格 MCP 读取与核验兼容问题修复说明-20261102》R1/R2/R4/R5 与 D1。集成分支 `spec/compat-read-verify-20261102`，提交 `9df4bef9f2d274a7c4760258aa35ab68bf6bd444`，包版本仍为 `0.9.0`。本轮只改读取、计划、回读和核验语义，业务文档未写入。
 
 - **R1 `field_order`**：更新已有视图时表示“当前视图全部列（含隐藏列）的排列”，不得用全表字段补齐、增删列或混入其他表字段；新建视图的字段选择使用独立契约。计划、执行回读与核验共用同一校验。离线覆盖 29 字段表/16 列视图、29 列替换、重复/未知/遗漏/混入其他表字段及重复正确排列零写入。
 - **R4 隐藏列**：`hidden_fields` 按集合比较，乱序不再报差异；缺少/多出字段返回具体路径；省略保持原值，显式 `[]` 清空。`field_order`、分组和排序仍按顺序比较。
@@ -205,16 +205,16 @@ URL 校验采用精确域名匹配：第一方鉴权下载仅允许已验证的�
 ### 离线检查结果
 
 - `npm run check`：通过（`tsc --noEmit`，无输出）。
-- `npm test`：**136 项**，通过 136、失败 0、跳过 0、取消 0、todo 0，耗时约 657 ms。
+- `npm test`：**143 项**，通过 143、失败 0、跳过 0、取消 0、todo 0，耗时约 657 ms。
 - `npm run check:public`：通过（`{"public_file_check":"passed","history":false,"staged":false,"revisions":1,"blobs":75}`）。
 
 ### 安装与构建标识
 
-- 构建：`npm run build` → `build_id=sha256:7a20996b0c0c06a48122b74f7085894b66b0e4871d665844572e65269693047c`，输出结构版本 `3`，派生解析器版本 `2`。
+- 构建：`npm run build` → `build_id=sha256:e3b7e8994e6b937f4fa470e613769f9e224096fe99edec54002ac32ed7d176f1`，输出结构版本 `4`，派生解析器版本 `3`。
 - 打包：`npm pack` 生成 36 个文件的 `wecom-smarttable-mcp-0.9.0.tgz`。
 - 安装：`npm install --prefix ~/.local/share/wecom-smarttable-mcp/runtime --no-save ./wecom-smarttable-mcp-0.9.0.tgz --omit=dev`，安装包版本 `0.9.0`。
 - 入口：`<runtime>/node_modules/wecom-smarttable-mcp/dist/server.js`（默认 runtime 为 `~/.local/share/wecom-smarttable-mcp/runtime`），SHA-256 `16772c369b06f7f1e56a344f946ecaec122e4290d07b3a0158401332a65cc094`。
-- 安装后 stdio 冒烟：服务名 `wecom-smarttable`、版本 `0.9.0`、工具 33 个；`wecom_capabilities` 无需文档登录即返回安装清单，`build_id` 与仓库构建一致，`output_schema_version=3`、`derived_parser_version=2`、`running.matches_build=true`（`entry_sha256` 与清单入口哈希一致）。`authentication.login_state` 为 `not_probed_this_call`。
+- 安装后 stdio 冒烟：服务名 `wecom-smarttable`、版本 `0.9.0`、工具 33 个；`wecom_capabilities` 无需文档登录即返回安装清单，`build_id` 与仓库构建一致，`output_schema_version=4`、`derived_parser_version=3`、`running.matches_build=true`（`entry_sha256` 与清单入口哈希一致）。`authentication.login_state` 为 `not_probed_this_call`。
 
 ### 线上验收状态（未完成）
 
