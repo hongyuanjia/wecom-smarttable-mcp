@@ -31,7 +31,8 @@ test('真实 stdio MCP 公布三十三个工具，新写入口按能力矩阵拒
     assert.equal(query.inputSchema.additionalProperties, false);
     const executions = tools.find(t => t.name === 'wecom_list_executions');
     assert.equal('plan_id' in executions.inputSchema.properties, true);
-    for (const name of ['create_view', 'update_view', 'create_formula_field', 'update_formula_field', 'add_records']) {
+    for (const name of ['create_view', 'update_view', 'create_formula_field', 'update_formula_field', 'add_records',
+      'create_sheet', 'rename_sheet', 'delete_sheet', 'upload_asset']) {
       const tool = tools.find(t => t.name === `wecom_${name}`);
       assert.equal('plan_id' in tool.inputSchema.properties, true, name);
       assert.equal(tool.inputSchema.additionalProperties, false, name);

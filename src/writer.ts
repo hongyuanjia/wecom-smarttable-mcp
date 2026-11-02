@@ -10,7 +10,7 @@ import { parseDocumentRole, parseRecyclePage } from './document-protocol.js';
 import { acknowledgedClears, addColumnMutations, appendRank, columnViewsMatch, deleteColumnMutations, memberUpdateMutations, mutation, newId, uniqueIds, updateMutations, valuesMatch,
   type CellValue, type ColumnInput, type MemberChange, type Mutation, type RecordInput } from './mutations.js';
 import { cellsFor, parseDerivedResult } from './protocol.js';
-import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, normalizeView, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
+import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, normalizeView, viewStatisticsMatches, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
 import { normalizeFields } from './fields.js';
 import { formulaFieldMutations, formulaFormatter, formulaFormatterMatches, lookupFieldMutations, relationFieldMutations, type FormulaFormatSpec, type LookupSpec, type RelationSpec } from './field-writer.js';
 import { assertFormulaDefinition, assertProviderFormulaSupport, encodeProviderFormula, type FormulaExpression } from './formulas.js';
@@ -255,6 +255,7 @@ function viewMatchesRaw(raw: Raw, expected: Raw) {
     const actualWidth = properties.k5?.[id]?.k1;
     if (expectedWidth !== undefined && actualWidth !== undefined && actualWidth !== expectedWidth) return false;
   }
+  if ((properties.k10 === true) !== (expectedProperties['10'] === true)) return false;
   return true;
 }
 
@@ -614,15 +615,11 @@ export class WecomWriter {
       // 3025 写 k10（字段统计启用标志，不是底部统计行显隐）；null 归一化为关闭。
       const desired = encodeViewStatistics(patch.statistics)['1'];
       if (desired !== (properties.k10 === true)) {
-        // 只改 k10；用规范化摘要核对其他设置未被覆盖，并保持 config_digest 算法不变。
-        const expectedDigest = normalizeView({ ...raw, [`k${raw.k32}`]: { ...properties, k10: desired } },
-          normalizedFields).config_digest;
+        // 只核对 k10：同一次调用中的其他步骤会改变整体 config_digest，不能拿整视图摘要比较。
         changes.push({ commands: [mutation(3025, { '1': sheetId, '2': viewId, '3': encodeViewStatistics(desired) })],
           verify: schema => {
             const actual = currentView(schema);
-            if (!actual) return false;
-            return rawViewProperties(actual).k10 === desired
-              && normalizeView(actual, normalizedFields).config_digest === expectedDigest;
+            return Boolean(actual && viewStatisticsMatches(actual, desired));
           } });
       }
     }
@@ -700,6 +697,8 @@ export class WecomWriter {
   private async commitBlock(url: string, target: Target, subId: string, command: Mutation, operation: string, affected: Raw,
     verify: (structure: Awaited<ReturnType<WecomClient['structure']>>) => boolean) {
     const revision = target.chunk.revision;
+    const intent = { document_id: target.doc.id, sheet_id: target.sheetId, operation, ...affected,
+      ...(target.planId ? { plan_id: target.planId } : {}) };
     const taskId = randomInt(1, 2 ** 48 - 1);
     const payload = {
       common: { need_optimize: true, once_mode: true, type: 'USER_CHANGES', curRev: revision, offlineMsg: true,
@@ -709,7 +708,7 @@ export class WecomWriter {
         changeSetCount: 1, changeset: JSON.stringify([[command]]) + '\n', changesetType: 'smartsheet' }],
     };
     const response = await this.post('/dop-api/commitchanges', { padId: target.doc.id, xsrf: this.client.cookie('TOK') },
-      { data: JSON.stringify(payload) }, { document_id: target.doc.id, operation, ...affected });
+      { data: JSON.stringify(payload) }, intent);
     let committedRevision: number | undefined;
     try {
       const matches = response.Data?.respective?.filter((entry: Raw) => entry.commitId === taskId);
@@ -720,41 +719,49 @@ export class WecomWriter {
       committedRevision = accepted.newRev;
       const structure = await this.client.structure(url);
       if (!verify(structure)) throw new WecomError('WRITE_MISMATCH', '重新读取的结果与请求不一致。');
-      return { document_id: target.doc.id, operation, ...affected, status: 'verified',
-        previous_revision: revision, committed_revision: committedRevision, revision: committedRevision };
+      const executionId = await this.recordExecution({ status: 'verified', document_id: target.doc.id,
+        ...(target.planId ? { plan_id: target.planId } : {}),
+        sheet_id: target.sheetId, operation, ...affected, previous_revision: revision,
+        committed_revision: committedRevision, revision: committedRevision });
+      return { ...intent, execution_id: executionId, status: 'verified', previous_revision: revision,
+        committed_revision: committedRevision, revision: committedRevision };
     } catch (error) {
-      if (error instanceof WecomError && error.code === 'WRITE_MISMATCH') throw error;
+      const reasonCode = error instanceof WecomError ? error.code : 'LOCAL_ERROR';
+      const reasonMessage = error instanceof WecomError ? error.message : '本地错误';
+      const executionId = await this.recordExecution({ status: 'not_verified', document_id: target.doc.id,
+        ...(target.planId ? { plan_id: target.planId } : {}),
+        sheet_id: target.sheetId, operation, ...affected, committed_revision: committedRevision,
+        reason_code: reasonCode, reason_message: reasonMessage });
       throw new WecomError('WRITE_NOT_VERIFIED', '服务端已返回写入响应，但回读未能完整核对；请先检查目标，不能直接重复提交。', {
-        document_id: target.doc.id, operation, ...affected, committed_revision: committedRevision,
-        reason_code: error instanceof WecomError ? error.code : 'UNKNOWN',
-        reason_message: error instanceof Error ? error.message : String(error), may_have_written: true, automatic_retry: false,
+        ...intent, execution_id: executionId, committed_revision: committedRevision, reason_code: reasonCode,
+        reason_message: reasonMessage, may_have_written: true, automatic_retry: false,
       });
     }
   }
 
-  async createSheet(url: string, title: string, revision: number) {
+  async createSheet(url: string, title: string, revision: number, planId?: string) {
     const structure = await this.client.structure(url);
     if (structure.sheets.length === 0) throw new WecomError('UNKNOWN_SHEET', '文档中没有可定位的现有子表。');
-    const target = await this.prepare(url, structure.sheets[0].id, revision);
+    const target = await this.prepare(url, structure.sheets[0].id, revision, planId);
     const sheetId = newId('q');
     if (structure.sheets.some(sheet => sheet.id === sheetId)) throw new WecomError('ID_COLLISION', '随机子表 ID 与已有子表重复，尚未提交。');
     return this.commitBlock(url, target, sheetId, mutation(3001, { '1': sheetId, '2': title, '3': structure.sheets.length, '4': 0, '6': null }),
       'create_sheet', { sheet_id: sheetId, title }, result => result.sheets.some(sheet => sheet.id === sheetId && sheet.name === title));
   }
 
-  async renameSheet(url: string, sheetId: string, revision: number, title: string) {
-    const target = await this.prepare(url, sheetId, revision);
+  async renameSheet(url: string, sheetId: string, revision: number, title: string, planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     return this.commitBlock(url, target, sheetId, mutation(3004, { '1': sheetId, '2': { '1': title } }),
       'rename_sheet', { sheet_id: sheetId, title }, result => result.sheets.some(sheet => sheet.id === sheetId && sheet.name === title));
   }
 
-  async deleteSheet(url: string, sheetId: string, revision: number) {
+  async deleteSheet(url: string, sheetId: string, revision: number, planId?: string) {
     const structure = await this.client.structure(url);
     if (structure.sheets.length <= 1) throw new WecomError('INVALID_ARGUMENT', '至少保留一个子表，不能删除最后一个。');
     const index = structure.sheets.findIndex(sheet => sheet.id === sheetId);
     if (index < 0) throw new WecomError('UNKNOWN_SHEET', '子表 ID 不属于此文档。', { sheet_id: sheetId });
     const parentId = structure.sheets[index].parent_id;
-    const target = await this.prepare(url, sheetId, revision);
+    const target = await this.prepare(url, sheetId, revision, planId);
     return this.commitBlock(url, target, sheetId, mutation(3002, { '1': sheetId, '2': index, '3': parentId ?? null }),
       'delete_sheet', { sheet_id: sheetId }, result => !result.sheets.some(sheet => sheet.id === sheetId));
   }
