@@ -137,6 +137,15 @@ test('双源同时存在时优先 k36.k1 并报告冲突，解析失败不被另
   assert.equal(invalidStandard.value, null);
   assert.equal(invalidStandard.alternate_valid, true);
 
+  const invalidLegacy = parseDerivedResult({
+    k30: 19,
+    k36: { k1: JSON.stringify({ sourceType: 19, data: [{ text: '1', number: 1, formatterType: 2 }] }), k2: true },
+    k3601: '{',
+  });
+  assert.equal(invalidLegacy.status, 'present');
+  assert.equal(invalidLegacy.value, 1);
+  assert.deepEqual(invalidLegacy.alternate_parse_error, { source: 'k3601', parse_error: 'invalid_json' });
+
   const legacyString = parseDerivedResult({ k30: 19, k3601: JSON.stringify(percentPayload) });
   const legacyObject = parseDerivedResult(legacyCell(percentPayload));
   assert.deepEqual(legacyString, legacyObject);

@@ -237,7 +237,9 @@ export function parseDerivedResult(cell: Raw | undefined) {
   const standardDecoded = hasStandard ? decodeDerivedPayload(standard) : null;
   const legacyDecoded = hasLegacy ? decodeDerivedPayload(legacy) : null;
   if (standardDecoded && !standardDecoded.ok) {
-    return parseError(standardDecoded.error, 'k36.k1', Boolean(legacyDecoded?.ok));
+    return { ...parseError(standardDecoded.error, 'k36.k1', Boolean(legacyDecoded?.ok)),
+      ...(legacyDecoded && !legacyDecoded.ok
+        ? { alternate_parse_error: { source: 'k3601', parse_error: legacyDecoded.error } } : {}) };
   }
   const parsed = standardDecoded?.ok ? standardDecoded.parsed : legacyDecoded?.ok ? legacyDecoded.parsed : null;
   if (!parsed) {
@@ -248,6 +250,9 @@ export function parseDerivedResult(cell: Raw | undefined) {
   if (standardDecoded?.ok && legacyDecoded?.ok
     && stableDerived(normalized) !== stableDerived(normalizeDerived(legacyDecoded.parsed))) {
     normalized.source_conflict = { preferred: 'k36.k1', alternate: 'k3601' };
+  } else if (standardDecoded?.ok && legacyDecoded && !legacyDecoded.ok) {
+    // 首选来源可用，但另一来源解析失败也必须显式报告，不能静默丢弃。
+    normalized.alternate_parse_error = { source: 'k3601', parse_error: legacyDecoded.error };
   }
   return normalized;
 }
