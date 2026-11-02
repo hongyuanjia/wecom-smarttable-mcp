@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dueStatus, completionRate, shanghaiDayKey, todayInShanghai, validateFormulaExpression,
-  validateFormulaDefinition, assertFormulaDefinition, unsupportedProviderCalls,
+  validateFormulaDefinition, assertFormulaDefinition, assertProviderFormulaSupport, unsupportedProviderCalls,
   evaluateFormula, annualCounts, encodeProviderFormula } from '../dist/formulas.js';
 
 const fields = [
@@ -144,4 +144,67 @@ test('网页公式编码：DATEDIF 补足按天单位，文本 COUNTIF 明确拒
   const invalid = validateFormulaDefinition({ expression: { kind: 'call', name: 'count_equals', args: [
     { kind: 'field', field_id: 'f_name' }, { kind: 'constant', value: '已完成' }] }, result_type: 'number' }, fields);
   assert.ok(invalid.errors.some(error => error.code === 'UNSUPPORTED_FORMULA'));
+});
+
+test('COALESCE/PERCENT/文本 COUNTIF 在写入前以 UNSUPPORTED_FORMULA 拒绝并附带服务端错误上下文', () => {
+  const coalesce = { expression: { kind: 'call', name: 'coalesce', args: [
+    { kind: 'field', field_id: 'f_name' }, { kind: 'constant', value: '未填写' }] }, result_type: 'text' };
+  assert.throws(() => assertFormulaDefinition(coalesce, fields), error => {
+    assert.equal(error.code, 'UNSUPPORTED_FORMULA');
+    const entry = error.details.unsupported.find(item => item.function === 'coalesce');
+    assert.equal(entry.provider_name, 'COALESCE');
+    assert.equal(entry.provider_error_type, 8);
+    assert.equal(entry.provider_error_text, '不识别的内容');
+    return true;
+  });
+
+  const percent = { expression: { kind: 'call', name: 'percent', args: [
+    { kind: 'constant', value: 1 }, { kind: 'constant', value: 2 }] }, result_type: 'number' };
+  assert.throws(() => assertFormulaDefinition(percent, fields), error => {
+    assert.equal(error.code, 'UNSUPPORTED_FORMULA');
+    const entry = error.details.unsupported.find(item => item.function === 'percent');
+    assert.equal(entry.provider_name, 'PERCENT');
+    assert.equal(entry.provider_error_type, 8);
+    assert.equal(entry.provider_error_text, '不识别的内容');
+    return true;
+  });
+
+  const textCountif = { expression: { kind: 'call', name: 'count_equals', args: [
+    { kind: 'field', field_id: 'f_name' }, { kind: 'constant', value: '已完成' }] }, result_type: 'number' };
+  assert.throws(() => assertFormulaDefinition(textCountif, fields), error => {
+    assert.equal(error.code, 'UNSUPPORTED_FORMULA');
+    const entry = error.details.unsupported.find(item => item.function === 'count_equals');
+    assert.equal(entry.provider_name, 'COUNTIF');
+    assert.equal(entry.provider_error_type, 4);
+    assert.equal(entry.provider_error_text, '计算错误');
+    assert.equal(entry.field_type, 'TEXT');
+    assert.equal(entry.field_id, 'f_name');
+    return true;
+  });
+
+  for (const definition of [coalesce, percent, textCountif]) {
+    assert.equal(validateFormulaDefinition(definition, fields).status, 'invalid');
+  }
+
+  // 直接创建/更新写入路径使用同一个提交前守卫，错误信息必须说明未提交写入。
+  for (const [definition, errorType] of [[coalesce, 8], [percent, 8], [textCountif, 4]]) {
+    assert.throws(() => assertProviderFormulaSupport(definition.expression, fields, 'write'), error => {
+      assert.equal(error.code, 'UNSUPPORTED_FORMULA');
+      assert.ok(error.message.includes('未提交写入'));
+      assert.equal(error.details.unsupported[0].provider_error_type, errorType);
+      return true;
+    });
+  }
+});
+
+test('数值字段的 COUNTIF 保持可用', () => {
+  const numericCountif = { expression: { kind: 'call', name: 'count_equals', args: [
+    { kind: 'field', field_id: 'f_count' }, { kind: 'constant', value: 0 }] }, result_type: 'number' };
+  const validation = validateFormulaDefinition(numericCountif, fields);
+  assert.equal(validation.status, 'valid');
+  assert.deepEqual(validation.dependencies, ['f_count']);
+  assert.doesNotThrow(() => assertFormulaDefinition(numericCountif, fields));
+  assert.deepEqual(encodeProviderFormula(numericCountif.expression, fields), [
+    { '1': 1, '2': 'COUNTIF(' }, { '1': 2, '3': 'f_count' }, { '1': 1, '2': ',0)' },
+  ]);
 });
