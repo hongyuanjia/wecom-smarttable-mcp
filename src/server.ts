@@ -204,7 +204,7 @@ serveStdio(() => {
     inputSchema: z.strictObject({ url, sheet_id: id, page_size: z.number().int().min(1).max(200).default(50),
       fields: z.array(id).min(1).max(500).optional(), cursor: z.string().max(16384).describe('原样传回上一页的 next_cursor。').optional(), include_text_fragments: includeTextFragments }) },
     (args, ctx) => run('wecom_read_records', args, ctx, async client => ({ result: await client.readRecords(args.url, args.sheet_id, args.page_size, args.fields, args.cursor, args.include_text_fragments) })));
-  server.registerTool('wecom_query_records', { description: '服务端按条件筛选并分页返回匹配记录，无需全表扫描。先查结构获取字段/选项/记录 ID。支持 TEXT/URL/邮箱/电话的 eq/ne/contains/not_contains、单选/多选的 eq/ne/contains/not_contains、人员 eq/ne、数字/进度/日期的比较、复选框 eq/ne、关联记录 contains 及所有类型的 empty/not_empty；支持 and/or。后续页保持相同条件，fields 可省略以沿用上一页。忽略 URL 视图筛选。图片/附件返回可直接交给 wecom_download_asset 的完整 locator。遇 STALE_CURSOR 从第一页重新查询。', annotations,
+  server.registerTool('wecom_query_records', { description: '服务端按条件筛选并分页返回匹配记录，无需全表扫描。先查结构获取字段/选项/记录 ID。支持 TEXT/URL/电话/邮箱的 eq/ne/contains/not_contains、单选 eq/ne、多选 eq/ne/contains/not_contains、人员 eq/ne、数字/进度的比较、日期比较、复选框 eq/ne，以及各类型的 empty/not_empty；支持 and/or。关联/双向关联没有按记录 ID 过滤，值条件按被关联记录标题文本 eq/ne/contains/not_contains 筛选。值键或类型不匹配会在本地拒绝，不会静默返回全表。后续页保持相同条件，fields 可省略以沿用上一页。忽略 URL 视图筛选。图片/附件返回可直接交给 wecom_download_asset 的完整 locator。遇 STALE_CURSOR 从第一页重新查询。', annotations,
     inputSchema: z.strictObject({ url, sheet_id: id,
       filter: z.strictObject({ conjunction: z.enum(['and', 'or']).default('and'), conditions: z.array(z.strictObject({
         field_id: id, operator: z.enum(['eq', 'ne', 'contains', 'not_contains', 'gt', 'gte', 'lt', 'lte', 'empty', 'not_empty']),
