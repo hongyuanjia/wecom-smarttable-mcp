@@ -11,6 +11,7 @@ import { acknowledgedClears, addColumnMutations, appendRank, columnViewsMatch, d
   type CellValue, type ColumnInput, type MemberChange, type Mutation, type RecordInput } from './mutations.js';
 import { cellsFor, parseDerivedResult } from './protocol.js';
 import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, normalizeView, viewStatisticsMatches, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
+import { assertNoDuplicateFieldIds, compareHiddenFieldSets, compareProtectedWidths, compareRequestedWidths } from './view-semantics.js';
 import { normalizeFields } from './fields.js';
 import { formulaFieldMutations, formulaFormatter, formulaFormatterMatches, lookupFieldMutations, relationFieldMutations, type FormulaFormatSpec, type LookupSpec, type RelationSpec } from './field-writer.js';
 import { assertFormulaDefinition, assertProviderFormulaSupport, encodeProviderFormula, type FormulaExpression } from './formulas.js';
@@ -226,6 +227,18 @@ function rawHiddenFields(raw: Raw): string[] {
 function rawColumnOrder(raw: Raw): string[] {
   const properties = rawViewProperties(raw);
   return Array.isArray(properties?.k2) ? properties.k2.filter((id: unknown): id is string => typeof id === 'string') : [];
+}
+
+function rawWidths(raw: Raw): Record<string, number> {
+  const properties = rawViewProperties(raw);
+  const widths: Record<string, number> = {};
+  if (properties && typeof properties.k5 === 'object' && properties.k5) {
+    for (const [id, info] of Object.entries(properties.k5)) {
+      if (info && typeof info === 'object' && typeof (info as Raw).k1 === 'number'
+        && Number.isFinite((info as Raw).k1)) widths[id] = (info as Raw).k1;
+    }
+  }
+  return widths;
 }
 
 function sameStringSet(left: string[], right: string[]) {
@@ -528,6 +541,7 @@ export class WecomWriter {
     const fieldsById = new Map(normalizedFields.map(field => [field.id, field]));
     const filterPatch = patch.filter;
     const properties = rawViewProperties(raw);
+    const beforeWidths = rawWidths(raw);
     const changes: { commands: Mutation[]; verify: (schema: Schema) => boolean }[] = [];
     const currentView = (schema: Schema) => schema.raw.k4.find((candidate: Raw) => candidate.k30 === viewId);
     if (patch.scope !== undefined) {
@@ -585,6 +599,7 @@ export class WecomWriter {
       hiddenPatch = columns.filter(id => !card.has(id));
     }
     if (hiddenPatch !== undefined) {
+      assertNoDuplicateFieldIds(hiddenPatch, '隐藏列');
       for (const id of hiddenPatch) if (!fieldsById.has(id)) throw new WecomError('UNKNOWN_FIELD', '隐藏列包含不存在字段。', { field_id: id });
       const desired = new Set(hiddenPatch);
       const current = new Set(rawHiddenFields(raw));
@@ -595,7 +610,7 @@ export class WecomWriter {
       if (toShow.length) commands.push(mutation(3018, { '1': sheetId, '2': viewId, '3': toShow, '4': { '1': false } }));
       if (commands.length) changes.push({ commands, verify: schema => {
         const actual = currentView(schema);
-        return Boolean(actual && sameStringSet(rawHiddenFields(actual), [...desired]));
+        return Boolean(actual && compareHiddenFieldSets(rawHiddenFields(actual), [...desired]).length === 0);
       } });
     }
     if (patch.widths !== undefined) {
@@ -604,11 +619,14 @@ export class WecomWriter {
         if (!fieldsById.has(id)) throw new WecomError('UNKNOWN_FIELD', '列宽包含不存在字段。', { field_id: id });
         commands.push(mutation(3024, { '1': sheetId, '2': viewId, '3': id, '4': { '1': width } }));
       }
+      const requested = Object.keys(patch.widths);
       if (commands.length) changes.push({ commands, verify: schema => {
         const actual = currentView(schema);
         if (!actual) return false;
-        const widths = rawViewProperties(actual).k5 || {};
-        return Object.entries(patch.widths!).every(([id, width]) => widths[id]?.k1 === width);
+        const afterWidths = rawWidths(actual);
+        // 分别核查“请求已生效”和“未请求键未受损”；未请求键不能被局部写入重置。
+        return compareRequestedWidths(afterWidths, patch.widths!).length === 0
+          && compareProtectedWidths(beforeWidths, afterWidths, requested).length === 0;
       } });
     }
     if (patch.statistics !== undefined) {

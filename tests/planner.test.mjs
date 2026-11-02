@@ -215,3 +215,82 @@ test('核对：成员按身份比较，视图按规范化配置比较，未解�
   assert.equal(notReturned.actions[0].status, 'pending');
   assert.ok(notReturned.actions[0].details.some(detail => detail.includes('not_returned')));
 });
+
+const allFieldIds = fields.map(field => field.id);
+const hiddenExample = ['f_status', 'f_owner', 'f_title'];
+
+function hiddenView(id, name, { hidden = hiddenExample, widths = {} } = {}) {
+  return normalizeView({
+    k30: id, k31: name, k32: 1, k33: 0, k34: 'owner', k35: 1, k37: [], k38: {},
+    k1: {
+      k1: hidden, k2: allFieldIds, k3: 1, k4: 1,
+      k5: Object.fromEntries(allFieldIds.map(fieldId => [fieldId,
+        { k1: widths[fieldId] ?? 100, k2: hidden.includes(fieldId) }])),
+      k6: true, k7: [], k8: null, k9: [], k10: true, k13: '',
+    },
+  }, fields);
+}
+
+test('核对：隐藏列乱序判 verified，缺少/多出隐藏列按具体路径判 pending', () => {
+  const views = [hiddenView('v_hidden', '隐藏列视图')];
+  const reordered = verifyChanges(context({ views }), [
+    { kind: 'view', action: 'update', sheet_id: 't_people', view_id: 'v_hidden',
+      patch: { hidden_fields: ['f_title', 'f_owner', 'f_status'] } },
+  ]);
+  assert.equal(reordered.actions[0].status, 'verified');
+  assert.deepEqual(reordered.actions[0].differences, []);
+
+  const changed = verifyChanges(context({ views }), [
+    { kind: 'view', action: 'update', sheet_id: 't_people', view_id: 'v_hidden',
+      patch: { hidden_fields: ['f_title', 'f_owner'] } },
+  ]);
+  assert.equal(changed.actions[0].status, 'pending');
+  assert.deepEqual(changed.actions[0].differences, [
+    { path: 'hidden_fields.extra.f_status', expected: false, actual: true },
+  ]);
+
+  const added = verifyChanges(context({ views }), [
+    { kind: 'view', action: 'update', sheet_id: 't_people', view_id: 'v_hidden',
+      patch: { hidden_fields: ['f_title', 'f_owner', 'f_status', 'f_count'] } },
+  ]);
+  assert.equal(added.actions[0].status, 'pending');
+  assert.deepEqual(added.actions[0].differences, [
+    { path: 'hidden_fields.missing.f_count', expected: true, actual: false },
+  ]);
+});
+
+test('核对：列宽补丁只验证请求键，A=300/实际 299 报 widths.A，未请求键不报差异', () => {
+  const views = [hiddenView('v_widths', '列宽视图', { widths: { f_title: 299, f_owner: 140, f_count: 0 } })];
+  const wrong = verifyChanges(context({ views }), [
+    { kind: 'view', action: 'update', sheet_id: 't_people', view_id: 'v_widths',
+      patch: { widths: { f_title: 300 } } },
+  ]);
+  assert.equal(wrong.actions[0].status, 'pending');
+  assert.deepEqual(wrong.actions[0].differences, [
+    { path: 'widths.f_title', expected: 300, actual: 299 },
+  ]);
+
+  const applied = verifyChanges(context({ views }), [
+    { kind: 'view', action: 'update', sheet_id: 't_people', view_id: 'v_widths',
+      patch: { widths: { f_title: 299 } } },
+  ]);
+  assert.equal(applied.actions[0].status, 'verified');
+  assert.deepEqual(applied.actions[0].differences, []);
+});
+
+test('核对：11 视图隐藏列乱序与局部列宽补丁从误报 pending 恢复为 verified', () => {
+  const names = ['任务总览一', '任务总览二', '任务总览三', '任务总览四', '任务总览五',
+    '任务总览六', '任务总览七', '任务总览八', '任务总览九', '任务总览十', '任务总览十一'];
+  const views = names.map((name, index) => hiddenView(`v_sample_${index}`, name,
+    { widths: { f_title: 120, f_owner: 140, f_count: 0 } }));
+  const changes = names.map((_, index) => ({ kind: 'view', action: 'update', sheet_id: 't_people',
+    view_id: `v_sample_${index}`, patch: {
+      hidden_fields: ['f_title', 'f_owner', 'f_status'],
+      widths: { f_title: 120, f_owner: 140 },
+    } }));
+  const result = verifyChanges(context({ views }), changes);
+  assert.equal(result.actions.length, 11);
+  assert.equal(result.summary.verified, 11);
+  assert.equal(result.summary.pending, 0);
+  assert.equal(result.status, 'verified');
+});
