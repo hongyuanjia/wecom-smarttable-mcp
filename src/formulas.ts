@@ -120,7 +120,7 @@ export type FormulaExpression =
 
 export interface FormulaValidation {
   status: 'valid' | 'invalid';
-  errors: { code: string; message: string; path: string }[];
+  errors: { code: string; message: string; path: string; details?: Record<string, unknown> }[];
   dependencies: string[];
   inferred_type: 'text' | 'number' | 'boolean' | 'date' | 'mixed' | 'unknown';
   nodes: number;
@@ -187,10 +187,10 @@ export function validateFormulaExpression(expression: unknown, fields: Normalize
         if (['count', 'count_non_empty', 'count_equals', 'date_diff_days'].includes(node.name) && node.args[0]?.kind !== 'field') {
           errors.push({ code: 'FORMULA_INVALID', message: `函数 ${node.name} 的第一个参数必须是字段。`, path });
         }
-        if (node.name === 'count_equals' && node.args[0]?.kind === 'field') {
-          const source = fields.find(field => field.id === (node.args[0] as { field_id: string }).field_id);
-          if (source?.type === 'TEXT') errors.push({ code: 'UNSUPPORTED_FORMULA',
-            message: '文本字段的 COUNTIF 会被服务端拒绝；请改用数值或选项字段。', path });
+        // 这些函数能被本地解释器求值，但提供方会写入后计算失败；必须在提交前明确拒绝。
+        const limit = providerFormulaLimitForCall(node.name, node.args, fields);
+        if (limit) {
+          errors.push({ code: 'UNSUPPORTED_FORMULA', message: limit.reason, path, details: { ...limit } });
         }
         switch (node.name) {
           case 'if': return types[1] || 'unknown';
@@ -289,16 +289,22 @@ export function validateFormulaDefinition(definition: unknown, fields: Normalize
     calculation_note: '提供方公式计算状态与结果读取尚未验证；配置有效不等于计算已验证。' };
 }
 
-const PRIMARY_FORMULA_CODES = ['FIELD_DEPENDENCY_CONFLICT', 'FORMULA_TYPE_MISMATCH'] as const;
+const PRIMARY_FORMULA_CODES = ['FIELD_DEPENDENCY_CONFLICT', 'FORMULA_TYPE_MISMATCH', 'UNSUPPORTED_FORMULA'] as const;
 
-// 直接写入路径与计划工具共用校验结果；错误码优先映射到依赖/类型冲突，其余统一为 FORMULA_INVALID。
+// 直接写入路径与计划工具共用校验结果；错误码优先映射到依赖/类型/不支持，其余统一为 FORMULA_INVALID。
 export function assertFormulaDefinition(definition: unknown, fields: NormalizedField[], options: { field_id?: string } = {}) {
   const validation = validateFormulaDefinition(definition, fields, options);
   if (validation.status === 'invalid') {
     const codes = new Set(validation.errors.map(error => error.code));
     const code = PRIMARY_FORMULA_CODES.find(candidate => codes.has(candidate)) ?? 'FORMULA_INVALID';
-    throw new WecomError(code, '公式未通过本地校验；未提交写入。', {
-      errors: validation.errors, inferred_type: validation.inferred_type, result_type: validation.result_type });
+    const expression = isObject(definition) ? definition.expression : undefined;
+    const limits = expression === undefined ? [] : providerFormulaLimits(expression, fields);
+    const message = code === 'UNSUPPORTED_FORMULA' && limits.length
+      ? `${limits[0].reason}未提交写入。`
+      : '公式未通过本地校验；未提交写入。';
+    throw new WecomError(code, message, {
+      errors: validation.errors, ...(limits.length ? { unsupported: limits } : {}),
+      inferred_type: validation.inferred_type, result_type: validation.result_type });
   }
   return validation;
 }
@@ -377,6 +383,91 @@ export function annualCounts(records: { source_subtask_number?: unknown; status?
 export interface ProviderFormulaToken { '1': 1 | 2; '2'?: string; '3'?: string }
 
 export const PROVIDER_FORMULA_CALLS = new Set(['if', 'is_empty', 'today', 'count', 'count_non_empty', 'count_equals', 'date_diff_days', 'concat', 'round']);
+
+export interface ProviderFormulaLimit {
+  function: string;
+  provider_name: string;
+  reason: string;
+  provider_error_type: number | null;
+  provider_error_text: string | null;
+  field_id?: string;
+  field_type?: string;
+}
+
+// 2026-11-02 抓包结论：token 能保存不等于能计算。以下函数由服务端返回明确错误，禁止写入。
+const PROVIDER_UNSUPPORTED_CALLS: Record<string, Omit<ProviderFormulaLimit, 'function'>> = {
+  coalesce: {
+    provider_name: 'COALESCE',
+    provider_error_type: 8,
+    provider_error_text: '不识别的内容',
+    reason: 'COALESCE 在提供方计算为 errorType 8（不识别的内容），网页端没有该函数；请改用 ISBLANK 或空字符串处理。',
+  },
+  percent: {
+    provider_name: 'PERCENT',
+    provider_error_type: 8,
+    provider_error_text: '不识别的内容',
+    reason: 'PERCENT 在提供方计算为 errorType 8（不识别的内容），网页端没有该函数；请改用分子/分母算式并设置百分比展示格式。',
+  },
+};
+
+function providerFormulaLimitForCall(name: string, args: unknown, fields: NormalizedField[]): ProviderFormulaLimit | null {
+  const known = PROVIDER_UNSUPPORTED_CALLS[name];
+  if (known) return { function: name, ...known };
+  if (name === 'count_equals' && Array.isArray(args) && args[0]?.kind === 'field'
+    && typeof args[0].field_id === 'string') {
+    const source = fields.find(field => field.id === args[0].field_id);
+    if (source?.type === 'TEXT') {
+      return {
+        function: name, provider_name: 'COUNTIF', field_id: source.id, field_type: source.type,
+        provider_error_type: 4, provider_error_text: '计算错误',
+        reason: '文本字段的 COUNTIF 在提供方计算为 errorType 4（计算错误），服务端不支持文本范围 COUNTIF；请改用数值或选项字段。',
+      };
+    }
+  }
+  if (!PROVIDER_FORMULA_CALLS.has(name)) {
+    return {
+      function: name, provider_name: name.toUpperCase(),
+      provider_error_type: null, provider_error_text: null,
+      reason: `函数 ${name} 尚未验证网页公式编码。`,
+    };
+  }
+  return null;
+}
+
+// 收集所有提供方不支持的函数用法，供直接写入与计划工具在提交前拒绝。
+export function providerFormulaLimits(expression: unknown, fields: NormalizedField[] = []): ProviderFormulaLimit[] {
+  const limits: ProviderFormulaLimit[] = [];
+  const seen = new Set<string>();
+  const add = (limit: ProviderFormulaLimit) => {
+    const key = `${limit.function}:${limit.field_id ?? ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    limits.push(limit);
+  };
+  const visit = (node: any): void => {
+    if (!node || typeof node !== 'object') return;
+    if (node.kind === 'call' && typeof node.name === 'string') {
+      const limit = providerFormulaLimitForCall(node.name, node.args, fields);
+      if (limit) add(limit);
+      for (const arg of Array.isArray(node.args) ? node.args : []) visit(arg);
+      return;
+    }
+    if (node.kind === 'binary') { visit(node.left); visit(node.right); return; }
+    if (node.kind === 'unary') visit(node.operand);
+  };
+  visit(expression);
+  return limits;
+}
+
+export function assertProviderFormulaSupport(expression: unknown, fields: NormalizedField[], stage: 'write' | 'plan'): void {
+  const limits = providerFormulaLimits(expression, fields);
+  if (!limits.length) return;
+  const suffix = stage === 'plan' ? '未生成可执行计划。' : '未提交写入。';
+  throw new WecomError('UNSUPPORTED_FORMULA', `${limits[0].reason}${suffix}`, {
+    unsupported: limits,
+    functions: [...new Set(limits.map(limit => limit.function))],
+  });
+}
 
 export function unsupportedProviderCalls(expression: unknown): string[] {
   const names = new Set<string>();

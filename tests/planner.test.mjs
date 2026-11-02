@@ -156,6 +156,35 @@ test('公式无效时逐项标记 invalid，不把配置错误当作可用公式
   assert.equal(plan.actions[1].decision, 'skip');
 });
 
+test('计划：COALESCE/PERCENT/文本 COUNTIF 以 UNSUPPORTED_FORMULA 拒绝，数值 COUNTIF 可执行', () => {
+  const plan = planChanges(context(), [
+    { kind: 'formula_field', action: 'create', sheet_id: 't_people', name: '空值回退',
+      formula: { expression: { kind: 'call', name: 'coalesce', args: [
+        { kind: 'field', field_id: 'f_title' }, { kind: 'constant', value: '未填写' }] }, result_type: 'text' } },
+    { kind: 'formula_field', action: 'create', sheet_id: 't_people', name: '比例',
+      formula: { expression: { kind: 'call', name: 'percent', args: [
+        { kind: 'constant', value: 1 }, { kind: 'constant', value: 2 }] }, result_type: 'number' } },
+    { kind: 'formula_field', action: 'create', sheet_id: 't_people', name: '文本计数',
+      formula: { expression: { kind: 'call', name: 'count_equals', args: [
+        { kind: 'field', field_id: 'f_title' }, { kind: 'constant', value: '已完成' }] }, result_type: 'number' } },
+    { kind: 'formula_field', action: 'create', sheet_id: 't_people', name: '数值计数',
+      formula: { expression: { kind: 'call', name: 'count_equals', args: [
+        { kind: 'field', field_id: 'f_count' }, { kind: 'constant', value: 0 }] }, result_type: 'number', dependencies: ['f_count'] } },
+  ]);
+  assert.equal(plan.executable, false);
+  for (const action of plan.actions.slice(0, 3)) {
+    assert.equal(action.decision, 'invalid');
+    assert.equal(action.errors[0].code, 'UNSUPPORTED_FORMULA');
+    assert.ok(Array.isArray(action.errors[0].details.unsupported));
+  }
+  assert.equal(plan.actions[0].errors[0].details.unsupported[0].provider_error_type, 8);
+  assert.equal(plan.actions[1].errors[0].details.unsupported[0].provider_error_type, 8);
+  assert.equal(plan.actions[2].errors[0].details.unsupported[0].provider_error_type, 4);
+  assert.equal(plan.actions[2].errors[0].details.unsupported[0].field_type, 'TEXT');
+  assert.equal(plan.actions[3].decision, 'create');
+  assert.equal(plan.actions[3].errors, undefined);
+});
+
 test('核对：成员按身份比较，视图按规范化配置比较，未解释配置报告 unknown', () => {
   const pending = verifyChanges(context(), [
     { kind: 'member_cells', sheet_id: 't_people', field_id: 'f_owner', notify_members: false,

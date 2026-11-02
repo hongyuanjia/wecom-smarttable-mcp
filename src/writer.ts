@@ -13,7 +13,7 @@ import { cellsFor, parseDerivedResult } from './protocol.js';
 import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, normalizeView, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
 import { normalizeFields } from './fields.js';
 import { formulaFieldMutations, formulaFormatter, formulaFormatterMatches, lookupFieldMutations, relationFieldMutations, type FormulaFormatSpec, type LookupSpec, type RelationSpec } from './field-writer.js';
-import { assertFormulaDefinition, encodeProviderFormula, unsupportedProviderCalls, type FormulaExpression } from './formulas.js';
+import { assertFormulaDefinition, assertProviderFormulaSupport, encodeProviderFormula, type FormulaExpression } from './formulas.js';
 
 type Raw = Record<string, any>;
 
@@ -1175,10 +1175,7 @@ export class WecomWriter {
     formula: { expression: FormulaExpression; result_type: string; format?: FormulaFormatSpec | string; dependencies?: string[] }, planId?: string) {
     const target = await this.prepare(url, sheetId, revision, planId);
     const normalized = normalizeFields(target.schema, [sheetId]);
-    const unsupported = unsupportedProviderCalls(formula.expression);
-    if (unsupported.length) {
-      throw new WecomError('UNSUPPORTED_FORMULA', '这些函数尚未验证网页公式编码；未提交写入。', { functions: unsupported });
-    }
+    assertProviderFormulaSupport(formula.expression, normalized, 'write');
     assertFormulaDefinition(formula, normalized);
     const tokens = encodeProviderFormula(formula.expression, normalized);
     const formatter = resolveFormulaFormat(formula.format);
@@ -1208,10 +1205,7 @@ export class WecomWriter {
     let formatter: Raw | undefined;
     if (patch.formula) {
       const normalized = normalizeFields(target.schema, [sheetId]);
-      const unsupported = unsupportedProviderCalls(patch.formula.expression);
-      if (unsupported.length) {
-        throw new WecomError('UNSUPPORTED_FORMULA', '这些函数尚未验证网页公式编码；未提交写入。', { functions: unsupported });
-      }
+      assertProviderFormulaSupport(patch.formula.expression, normalized, 'write');
       assertFormulaDefinition(patch.formula, normalized, { field_id: fieldId });
       tokens = encodeProviderFormula(patch.formula.expression, normalized);
       formatter = resolveFormulaFormat(patch.formula.format) ?? raw.k19?.k2;
