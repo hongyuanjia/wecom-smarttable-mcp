@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { WecomError } from './errors.js';
+import { assertNoDuplicateFieldIds, compareHiddenFieldSets, compareRequestedWidths, compareWidthMaps, mergeWidths } from './view-semantics.js';
 import type { NormalizedField } from './fields.js';
 
 type Raw = Record<string, any>;
@@ -254,9 +255,6 @@ function compare(before: unknown, after: unknown): boolean {
 const placement = (items: { field_id: string; descending?: boolean }[]) =>
   items.map(item => ({ field_id: item.field_id, descending: Boolean(item.descending) }));
 
-const stableObject = (value: Record<string, unknown>) =>
-  Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]));
-
 function validateConditionInput(condition: ViewConditionInput, fields: Map<string, NormalizedField>, index: number) {
   const field = fields.get(condition.field_id);
   if (!field) throw new WecomError('UNKNOWN_FIELD', `筛选条件 ${index + 1} 引用了不存在或不可读取的字段。`, { field_id: condition.field_id });
@@ -278,7 +276,7 @@ function validateConditionInput(condition: ViewConditionInput, fields: Map<strin
 
 function validateFieldList(ids: string[], fields: Map<string, NormalizedField>, label: string, max: number) {
   if (!Array.isArray(ids) || ids.length > max) throw new WecomError('INVALID_ARGUMENT', `${label}数量无效。`);
-  if (new Set(ids).size !== ids.length) throw new WecomError('INVALID_ARGUMENT', `${label}包含重复字段。`);
+  assertNoDuplicateFieldIds(ids, label);
   for (const id of ids) if (!fields.has(id)) throw new WecomError('UNKNOWN_FIELD', `${label}包含不存在或不可读取的字段。`, { field_id: id });
 }
 
@@ -304,8 +302,8 @@ function normalizedConfigDifferences(existing: NormalizedView, expected: Normali
   push('type', existing.type, expected.type);
   push('scope', existing.scope, expected.scope);
   push('columns', existing.columns, expected.columns);
-  push('hidden_fields', existing.hidden_fields, expected.hidden_fields);
-  push('widths', stableObject(existing.widths), stableObject(expected.widths));
+  differences.push(...compareHiddenFieldSets(existing.hidden_fields, expected.hidden_fields));
+  differences.push(...compareWidthMaps(existing.widths, expected.widths));
   push('group', placement(existing.group), placement(expected.group));
   push('sort', placement(existing.sort), placement(expected.sort));
   push('filter', comparableFilter(existing.filter), comparableFilter(expected.filter));
@@ -390,6 +388,15 @@ export function planViewWrite(input: {
   const name = patch.name ?? existing?.name;
   if (!name) throw new WecomError('INVALID_ARGUMENT', '视图需要名称。');
 
+  // 同名创建比较也会读取补丁；集合/宽度校验必须先于任何比较执行，避免重复 ID 或非法宽度被静默折叠。
+  if (patch.hidden_fields !== undefined) validateFieldList(patch.hidden_fields, byId, '隐藏列', input.fields.length);
+  if (patch.widths !== undefined) {
+    for (const [id, width] of Object.entries(patch.widths)) {
+      if (!byId.has(id)) throw new WecomError('UNKNOWN_FIELD', '列宽设置包含不存在或不可读取的字段。', { field_id: id });
+      if (!Number.isInteger(width) || width < 1 || width > 1000) throw new WecomError('INVALID_ARGUMENT', '列宽必须是 1–1000 的整数。', { field_id: id, width });
+    }
+  }
+
   // 更新时重命名为另一个已存在的视图名同样需要先确认，不能静默制造同名视图。
   if (input.action === 'update' && existing && name !== existing.name) {
     const sameName = input.views.filter(view => view.id !== existing.id && view.name === name);
@@ -443,15 +450,11 @@ export function planViewWrite(input: {
     effective.columns = patch.field_order;
   } else effective.columns = existing?.columns ?? input.fields.map(field => field.id);
   if (patch.hidden_fields !== undefined) {
-    validateFieldList(patch.hidden_fields, byId, '隐藏列', input.fields.length);
     effective.hidden_fields = patch.hidden_fields;
   } else effective.hidden_fields = existing?.hidden_fields ?? [];
   if (patch.widths !== undefined) {
-    for (const [id, width] of Object.entries(patch.widths)) {
-      if (!byId.has(id)) throw new WecomError('UNKNOWN_FIELD', '列宽设置包含不存在或不可读取的字段。', { field_id: id });
-      if (!Number.isInteger(width) || width < 1 || width > 1000) throw new WecomError('INVALID_ARGUMENT', '列宽必须是 1–1000 的整数。', { field_id: id, width });
-    }
-    effective.widths = patch.widths;
+    // 局部补丁：未提交的列宽保持现状，避免把整段宽度字典当作替换目标。
+    effective.widths = mergeWidths(existing?.widths ?? {}, patch.widths);
   } else effective.widths = existing?.widths ?? {};
   if (patch.frozen_field_count !== undefined) {
     if (patch.frozen_field_count !== null && (!Number.isInteger(patch.frozen_field_count) || patch.frozen_field_count < 0 || patch.frozen_field_count > input.fields.length)) {
@@ -476,8 +479,9 @@ export function planViewWrite(input: {
   if (existing) {
     if (existing.name !== name) differences.push({ path: 'name', before: existing.name, after: name });
     if (!compare(existing.columns, effective.columns)) differences.push({ path: 'columns', before: existing.columns, after: effective.columns });
-    if (!compare(existing.hidden_fields, effective.hidden_fields)) differences.push({ path: 'hidden_fields', before: existing.hidden_fields, after: effective.hidden_fields });
-    if (!compare(stableObject(existing.widths), stableObject(effective.widths as Record<string, unknown>))) differences.push({ path: 'widths', before: existing.widths, after: effective.widths });
+    differences.push(...compareHiddenFieldSets(existing.hidden_fields, effective.hidden_fields as string[]));
+    // 只核验本次请求的列宽键；未请求键由 mergeWidths 保留，不作为差异。
+    if (patch.widths !== undefined) differences.push(...compareRequestedWidths(existing.widths, patch.widths));
     if (!compare(placement(existing.group), placement(effective.group as any))) differences.push({ path: 'group', before: existing.group, after: effective.group });
     if (!compare(placement(existing.sort), placement(effective.sort as any))) differences.push({ path: 'sort', before: existing.sort, after: effective.sort });
     if (patch.filter === null && existing.filter) differences.push({ path: 'filter', before: 'present', after: null });
