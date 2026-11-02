@@ -122,70 +122,134 @@ const derivedFormatterTypes: Record<number, string> = {
   14: 'PROGRESS', 16: 'EMAIL', 17: 'SINGLE_SELECT', 26: 'CURRENCY', 28: 'PERCENT',
 };
 
+function formatCode(value: unknown) {
+  return typeof value === 'number' || (typeof value === 'string' && value.length > 0) ? value : null;
+}
+
 export function formatterTypeName(code: unknown) {
-  return typeof code === 'number' ? derivedFormatterTypes[code] || `UNKNOWN_${code}` : null;
+  if (typeof code === 'number') return derivedFormatterTypes[code] || `UNKNOWN_${code}`;
+  if (typeof code === 'string' && /^-?\d+$/.test(code)) {
+    const numeric = Number(code);
+    return derivedFormatterTypes[numeric] || `UNKNOWN_${code}`;
+  }
+  return null;
 }
 
 function derivedItem(item: Raw) {
-  const formatterType = typeof item?.formatterType === 'number' ? item.formatterType : null;
+  const formatterType = formatCode(item?.formatterType ?? item?.formatter_type);
   const resultType = formatterTypeName(formatterType);
   const output: Raw = { text: typeof item?.text === 'string' ? item.text : null,
     formatter_type: formatterType, result_type: resultType };
-  for (const [source, target] of [['number', 'number'], ['formattedNumber', 'formatted_number'],
-    ['timestamp', 'timestamp'], ['decimalPlaces', 'decimal_places']]) {
-    if (typeof item?.[source] === 'number') output[target] = item[source];
+  for (const [sources, target] of [
+    [['number'], 'number'], [['formattedNumber', 'formatted_number'], 'formatted_number'],
+    [['timestamp'], 'timestamp'], [['decimalPlaces', 'decimal_places'], 'decimal_places'],
+  ] as [string[], string][]) {
+    const source = sources.find(key => typeof item?.[key] === 'number');
+    if (source) output[target] = item[source];
   }
   if (typeof item?.checked === 'boolean') output.checked = item.checked;
   if (typeof item?.link === 'string' && item.link) output.link = item.link;
   if (typeof item?.id === 'string') {
     if (resultType === 'USER') {
       output.member = { id: item.id, name: typeof item.name === 'string' ? item.name : null,
-        avatar_url: typeof item.avatarUrl === 'string' ? item.avatarUrl : null, namespace: 'wecom_uid' };
+        avatar_url: typeof (item.avatarUrl ?? item.avatar_url) === 'string' ? (item.avatarUrl ?? item.avatar_url) : null,
+        namespace: 'wecom_uid' };
     } else {
       output.option_id = item.id;
     }
   }
-  if (item?.isError) output.error = { type: typeof item.errorType === 'number' ? item.errorType : null,
-    message: typeof item.errorMessage === 'string' ? item.errorMessage : null,
-    args: Array.isArray(item.errorMessageArgs) ? item.errorMessageArgs : null };
+  if (item?.isError) output.error = { type: typeof (item.errorType ?? item.error_type) === 'number' ? (item.errorType ?? item.error_type) : null,
+    message: typeof (item.errorMessage ?? item.error_message) === 'string' ? (item.errorMessage ?? item.error_message) : null,
+    args: Array.isArray(item.errorMessageArgs ?? item.error_message_args) ? (item.errorMessageArgs ?? item.error_message_args) : null };
   return output;
 }
 
-// LOOKUP/FORMULA 的计算结果保存在 k36.k1（JSON 字符串），旧接口也使用 k3601。
-// 不能用 status=unresolved 代替：空结果、计算错误和待计算必须分别报告。
-export function parseDerivedResult(cell: Raw | undefined) {
-  if (!cell) return null;
-  const standard = cell.k36?.k1;
-  if (typeof standard !== 'string') {
-    if (cell.k3601) return { status: 'present', value: null, result_type: null,
-      computed_result: parseJson(cell.k3601, '派生字段结果') };
-    return cell.k36 ? { status: 'pending', value: null, result_type: null, computed_result: null } : null;
+type DecodedDerived = { ok: true; parsed: Raw } | { ok: false; error: 'invalid_json' | 'missing_data' };
+
+// 第一步：只负责把不同原始形态解码为同一对象，不解释业务语义。
+function decodeDerivedPayload(value: unknown): DecodedDerived {
+  let parsed: unknown = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value); } catch { return { ok: false, error: 'invalid_json' }; }
   }
-  let parsed: Raw;
-  try { parsed = JSON.parse(standard); } catch { return { status: 'unresolved', value: null,
-    result_type: null, computed_result: null, parse_error: 'invalid_json' }; }
-  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.data)) {
-    return { status: 'unresolved', value: null, result_type: null, computed_result: null, parse_error: 'missing_data' };
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false, error: 'missing_data' };
+  const candidate = parsed as Raw;
+  if (!Array.isArray(candidate.data) && !Array.isArray(candidate.items)) return { ok: false, error: 'missing_data' };
+  return { ok: true, parsed: candidate };
+}
+
+function stableDerived(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableDerived).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value as Raw).sort().map(key =>
+      `${JSON.stringify(key)}:${stableDerived((value as Raw)[key])}`).join(',')}}`;
   }
-  const items = parsed.data.map(derivedItem);
+  return JSON.stringify(value);
+}
+
+// 第二步：两种原始形态共用同一标准化入口，输出可比较的标准结构。
+function normalizeDerived(parsed: Raw): Raw {
+  const rawItems: Raw[] = Array.isArray(parsed.data) ? parsed.data : parsed.items;
+  const items = rawItems.map(derivedItem);
   const errors = items.filter(item => item.error);
   const members = items.filter(item => item.member).map(item => item.member);
   const options = items.filter(item => item.option_id).map(item => ({ id: item.option_id, text: item.text }));
   const resultTypes = [...new Set(items.map(item => item.result_type).filter(Boolean))];
   const resultType = resultTypes.length === 1 ? resultTypes[0] : null;
+  // 空值合并而不是真假判断：0、false、空字符串都保留为真实结果。
   const primary = (item: Raw) => item.number ?? item.timestamp ?? item.checked ?? item.text ?? null;
   const status = errors.length ? 'error' : items.length ? 'present' : 'empty';
   return {
     status,
     value: items.length === 0 ? [] : items.length === 1 ? primary(items[0]) : items.map(primary),
     result_type: resultType,
+    ...(items.length === 1 ? { display_text: items[0].text }
+      : items.length > 1 ? { display_texts: items.map(item => item.text) } : {}),
     ...(resultTypes.length > 1 ? { result_types: resultTypes } : {}),
-    computed_result: { source_type: typeof parsed.sourceType === 'number' ? parsed.sourceType : null,
-      formatter_type: items[0]?.formatter_type ?? null, result_type: resultType, data: items },
+    items,
+    computed_result: { source_type: typeof (parsed.sourceType ?? parsed.source_type) === 'number'
+      ? (parsed.sourceType ?? parsed.source_type) : null,
+    formatter_type: items[0]?.formatter_type ?? null, result_type: resultType, data: items },
     ...(members.length ? { members } : {}),
     ...(options.length ? { options } : {}),
     ...(errors.length ? { errors: errors.map(item => item.error) } : {}),
   };
+}
+
+function parseError(error: 'invalid_json' | 'missing_data', source: 'k36.k1' | 'k3601', alternateValid = false) {
+  return { status: 'parse_error', value: null, result_type: null, computed_result: null, items: [],
+    parse_error: error, parse_error_source: source, ...(alternateValid ? { alternate_valid: true } : {}) };
+}
+
+// LOOKUP/FORMULA 的计算结果保存在 k36.k1（JSON 字符串），旧接口也使用 k3601（对象或字符串）。
+// 不能用 status=unresolved 代替：空结果、计算错误和待计算必须分别报告。
+// 优先级：k36.k1 存在且可解析时使用它；两源语义冲突时保留首选值并报告 source_conflict。
+// k36.k1 解析失败时不回退掩盖错误；只有 k36.k1 缺失时才使用 k3601。
+export function parseDerivedResult(cell: Raw | undefined) {
+  if (!cell) return null;
+  const standard = cell.k36?.k1;
+  const legacy = cell.k3601;
+  const hasStandard = standard !== undefined && standard !== null;
+  const hasLegacy = legacy !== undefined && legacy !== null;
+  if (!hasStandard && !hasLegacy) {
+    return cell.k36 ? { status: 'pending', value: null, result_type: null, computed_result: null } : null;
+  }
+  const standardDecoded = hasStandard ? decodeDerivedPayload(standard) : null;
+  const legacyDecoded = hasLegacy ? decodeDerivedPayload(legacy) : null;
+  if (standardDecoded && !standardDecoded.ok) {
+    return parseError(standardDecoded.error, 'k36.k1', Boolean(legacyDecoded?.ok));
+  }
+  const parsed = standardDecoded?.ok ? standardDecoded.parsed : legacyDecoded?.ok ? legacyDecoded.parsed : null;
+  if (!parsed) {
+    if (legacyDecoded && !legacyDecoded.ok) return parseError(legacyDecoded.error, 'k3601');
+    return cell.k36 ? { status: 'pending', value: null, result_type: null, computed_result: null } : null;
+  }
+  const normalized = normalizeDerived(parsed);
+  if (standardDecoded?.ok && legacyDecoded?.ok
+    && stableDerived(normalized) !== stableDerived(normalizeDerived(legacyDecoded.parsed))) {
+    normalized.source_conflict = { preferred: 'k36.k1', alternate: 'k3601' };
+  }
+  return normalized;
 }
 
 export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pick<Chunk, 'start' | 'end'>>, schema: Schema, row: { id: string; raw: Raw }, docId: string, selected: string[], includeTextFragments = false) {
@@ -225,7 +289,8 @@ export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pi
         namespace_status: member.namespace_status, ...(member.unresolved.length ? { unresolved_members: member.unresolved } : {}) };
     } else if ([19, 20].includes(field.type_code)) {
       // FORMULA/LOOKUP 的 k36 标准单元格：保留返回类型、成员/选项引用及错误/空/待计算状态。
-      values[field.id] = parseDerivedResult(cell) ?? { status: cell ? 'unresolved' : 'not_returned', value: null };
+      values[field.id] = parseDerivedResult(cell) ?? { status: cell ? 'unresolved' : 'not_returned', value: null,
+        result_type: null, computed_result: null };
     } else {
       const value = cell?.[`k${field.type_code}`];
       values[field.id] = { status: value !== undefined ? 'present' : cell ? 'unresolved' : 'not_returned', value: value ?? null,
