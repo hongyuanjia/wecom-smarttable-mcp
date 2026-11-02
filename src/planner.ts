@@ -4,7 +4,7 @@ import { affectedDependents, dependencyCycles, userFieldMultiple, type Normalize
 import { capabilityById } from './capabilities.js';
 import { planViewWrite, type NormalizedView, type ViewWriteInput } from './views.js';
 import { compareMemberCell, memberFieldMultiple, planMemberUpdates, type MemberCell, type MemberUpdateInput } from './members.js';
-import { validateFormulaDefinition, PROVIDER_FORMULA_CALLS, type FormulaDefinition, type FormulaExpression } from './formulas.js';
+import { assertProviderFormulaSupport, validateFormulaDefinition, type FormulaDefinition } from './formulas.js';
 
 function isObject(value: unknown): value is Record<string, any> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -384,17 +384,7 @@ function formulaAction(context: PlanContext, change: Extract<PlanChange, { kind:
   if (!name) throw new WecomError('INVALID_ARGUMENT', '公式字段需要名称或用 field_id 定位。');
   action.summary = `${change.action === 'create' ? '新建' : '更新'}公式字段「${name}」`;
   if (change.formula.format !== undefined) action.notes.push('公式展示格式已按网页端真实编码写入；写入后需回读核对格式类型。');
-  const callNames = new Set<string>();
-  const collect = (node: FormulaExpression): void => {
-    if (node.kind === 'call') { callNames.add(node.name); node.args.forEach(collect); return; }
-    if (node.kind === 'binary') { collect(node.left); collect(node.right); return; }
-    if (node.kind === 'unary') { collect(node.operand); }
-  };
-  collect(change.formula.expression);
-  const unsupported = [...callNames].filter(name => !PROVIDER_FORMULA_CALLS.has(name));
-  if (unsupported.length) {
-    throw new WecomError('UNSUPPORTED_FORMULA', '这些函数尚未验证网页公式编码，未生成可执行计划。', { functions: unsupported });
-  }
+  assertProviderFormulaSupport(change.formula.expression, sheet.fields, 'plan');
   const validation = validateFormulaDefinition(change.formula, sheet.fields,
     { field_id: change.action === 'update' ? change.field_id : undefined });
   if (validation.status === 'invalid') {

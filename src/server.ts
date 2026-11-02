@@ -73,7 +73,7 @@ const viewPatch = z.strictObject({
   field_order: z.array(id).min(1).max(500).optional().describe('必须显式包含全部字段，避免遗漏或残留旧列。'),
   widths: z.record(id, z.number().int().min(1).max(1000)).optional(),
   frozen_field_count: z.number().int().min(0).max(500).nullable().optional(),
-  statistics: z.boolean().nullable().optional(),
+  statistics: z.boolean().nullable().optional().describe('字段统计启用标志（视图 k1.k10），通过 HTTP 3025 写入并回读；省略=保持，null 视为 false（关闭）。该标志不控制底部统计行的显隐，逐列统计未开放。'),
   kanban: z.strictObject({ group_field_id: id, card_fields: z.array(id).max(20), retains_empty_group: z.literal(true) }).optional(),
 });
 const lookupSide = z.strictObject({ scope: z.enum(['source', 'target']), field_id: id });
@@ -377,7 +377,7 @@ serveStdio(() => {
     inputSchema: z.strictObject({ ...tableChange, view: viewPatch.refine(value => Boolean(value.name), '新建视图需要 name。') }) },
     (args, ctx) => run('wecom_create_view', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
       .createView(args.url, args.sheet_id, args.expected_revision, args.view, args.plan_id) }), true));
-  server.registerTool('wecom_update_view', { description: '按 view_id 通过 HTTP 修改视图名称、scope（shared/locked/personal）、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列和看板卡片字段；省略的属性保持原值，filter:null 才表示清除筛选。',
+  server.registerTool('wecom_update_view', { description: '按 view_id 通过 HTTP 修改视图名称、scope（shared/locked/personal）、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列、字段统计标志（statistics，3025 写入 k1.k10）和看板卡片字段；省略的属性保持原值，filter:null 才表示清除筛选，statistics:null 视为关闭。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, view_id: id, patch: viewPatch }) },
     (args, ctx) => run('wecom_update_view', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
@@ -436,12 +436,12 @@ serveStdio(() => {
     inputSchema: z.strictObject({ ...tableChange, field_id: id, updates: z.array(relationUpdate).min(1).max(100) }) },
     (args, ctx) => run('wecom_update_relation_cells', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
       .updateRelationCells(args.url, args.sheet_id, args.expected_revision, args.field_id, args.updates, args.plan_id) }), true));
-  server.registerTool('wecom_create_formula_field', { description: '通过 HTTP 3014/3017 创建公式字段：结构化 AST 编码为网页公式 token（文本片段 + 字段引用），不使用 eval。写入前与计划工具共用函数注册、参数数量、类型、声明依赖、依赖冲突和循环校验，失败返回 FORMULA_INVALID/FORMULA_TYPE_MISMATCH/FIELD_DEPENDENCY_CONFLICT 且不提交 HTTP 写入。已验证 IF/ISBLANK/TODAY/COUNT/COUNTA/COUNTIF（数值范围）/DATEDIF（按天）/CONCATENATE/ROUND、字段引用、比较与算术；format 支持 text/number/percent/currency/date/checkbox/email/progress 及小数位/千位符。配置保存与计算结果分开报告。',
+  server.registerTool('wecom_create_formula_field', { description: '通过 HTTP 3014/3017 创建公式字段：结构化 AST 编码为网页公式 token（文本片段 + 字段引用），不使用 eval。写入前与计划工具共用函数注册、参数数量、类型、声明依赖、依赖冲突和循环校验，失败返回 FORMULA_INVALID/FORMULA_TYPE_MISMATCH/FIELD_DEPENDENCY_CONFLICT/UNSUPPORTED_FORMULA 且不提交 HTTP 写入。已验证 IF/ISBLANK/TODAY/COUNT/COUNTA/COUNTIF（数值字段）/DATEDIF（按天）/CONCATENATE/ROUND、字段引用、比较与算术；COALESCE/PERCENT（服务端 errorType 8）和文本字段 COUNTIF（errorType 4）在写入前拒绝，数值 COUNTIF 可用；format 支持 text/number/percent/currency/date/checkbox/email/progress 及小数位/千位符。配置保存与计算结果分开报告。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, name: z.string().trim().min(1).max(128), formula: formulaDefinition }) },
     (args, ctx) => run('wecom_create_formula_field', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
       .createFormulaField(args.url, args.sheet_id, args.expected_revision, args.name, args.formula as unknown as { expression: FormulaExpression; result_type: string; format?: string; dependencies?: string[] }, args.plan_id) }), true));
-  server.registerTool('wecom_update_formula_field', { description: '通过 HTTP 3017 更新公式字段名称、表达式或展示格式；结构化 AST 编码为网页公式 token。公式补丁在写入前执行与计划工具相同的函数、参数数量、类型、依赖冲突和循环校验；失败不提交写入。配置保存与计算结果分开报告。',
+  server.registerTool('wecom_update_formula_field', { description: '通过 HTTP 3017 更新公式字段名称、表达式或展示格式；结构化 AST 编码为网页公式 token。公式补丁在写入前执行与计划工具相同的函数、参数数量、类型、依赖冲突和循环校验；COALESCE/PERCENT（服务端 errorType 8）和文本字段 COUNTIF（errorType 4）以 UNSUPPORTED_FORMULA 拒绝，数值 COUNTIF 可用；失败不提交写入。配置保存与计算结果分开报告。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, field_id: id, patch: z.strictObject({
       name: z.string().trim().min(1).max(128).optional(),
