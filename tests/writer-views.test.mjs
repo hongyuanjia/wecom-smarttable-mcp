@@ -108,11 +108,11 @@ test('列宽真实变化只写请求且未请求列宽保持不变', async () =>
 });
 
 test('k1 声明的隐藏列与回读一致时不写 3018，显式空数组才产生清除写入', async () => {
-  const initial = rawView({ k1: ['f_text', 'f_task'] });
+  const initial = rawView({ k1: ['f_text', 'f_status'] });
   const noop = makeClient(initial);
   const writer = new WecomWriter(noop.client, new AbortController().signal);
   const result = await writer.updateView(url, 't_view', 7, 'v_edit',
-    { hidden_fields: ['f_task', 'f_text'] });
+    { hidden_fields: ['f_status', 'f_text'] });
   assert.equal(result.no_changes, true);
   assert.equal(result.revision, 7);
   assert.equal(noop.posts.length, 0, '声明来源 k1 已包含的隐藏列不应触发宽度标志来源的重复写入');
@@ -125,7 +125,7 @@ test('k1 声明的隐藏列与回读一致时不写 3018，显式空数组才产
   const payload = JSON.parse(clearing.posts[0].options.form.data);
   const commands = JSON.parse(payload.respective[0].changeset);
   assert.deepEqual(commands, [[{ t: 3018, v: 5, c: { '1': 't_view', '2': 'v_edit',
-    '3': ['f_text', 'f_task'], '4': { '1': false } }, r: -1, o: 0 }]]);
+    '3': ['f_text', 'f_status'], '4': { '1': false } }, r: -1, o: 0 }]]);
 });
 
 test('公式写后核对：parse_error 与 pending 分开计数，逐条样本保留各自状态', () => {

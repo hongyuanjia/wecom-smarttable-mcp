@@ -51,7 +51,9 @@ test('视图规范化：列顺序、隐藏列、列宽、分组、排序、筛�
   assert.equal(view.type, 'grid');
   assert.equal(view.type_verified, true);
   assert.deepEqual(view.columns, ['f_text', 'f_user', 'f_status']);
-  assert.deepEqual(view.hidden_fields, ['f_task']);
+  assert.deepEqual(view.hidden_fields, []);
+  assert.deepEqual(view.absent_fields, ['f_task']);
+  assert.equal(view.hidden_fields_source, 'absent_from_columns');
   assert.equal(view.widths.f_text, 280);
   assert.deepEqual(view.group, [{ field_id: 'f_status', field_name: '执行状态', descending: false }]);
   assert.deepEqual(view.sort, [{ field_id: 'f_text', field_name: '事项名称', descending: false }]);
@@ -340,6 +342,14 @@ test('隐藏列从宽度配置 k5.k2 解析，并提供可见列集合', () => {
   assert.deepEqual(view.columns, ['f_text', 'f_user', 'f_status']);
 });
 
+
+test('未加入视图的字段不能通过 hidden_fields 显示或隐藏，normalize 单独返回 absent_fields', () => {
+  const existing = normalizeView(rawView(), fields);
+  assert.deepEqual(existing.absent_fields, ['f_task']);
+  assert.throws(() => planViewWrite({ action: 'update', view_id: existing.id,
+    patch: { hidden_fields: ['f_task'] }, views: [existing], fields }),
+  error => error.code === 'UNSUPPORTED_VIEW_CHANGE');
+});
 
 test('视图范围：k35 映射公共/锁定/个人，创建时写入对应级别', () => {
   assert.equal(normalizeView({ ...rawView(), k35: 1 }, fields).scope, 'shared');

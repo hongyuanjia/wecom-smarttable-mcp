@@ -617,6 +617,15 @@ export class WecomWriter {
       throw new WecomError('INVALID_ARGUMENT', 'hidden_fields 与 kanban.card_fields 不能同时指定。');
     }
     if (patch.hidden_fields !== undefined) hiddenPatch = patch.hidden_fields;
+    if (hiddenPatch !== undefined && raw.k32 !== 2) {
+      const columns = new Set(rawColumnOrder(raw));
+      const outside = hiddenPatch.filter(id => !columns.has(id));
+      if (outside.length) {
+        throw new WecomError('UNSUPPORTED_VIEW_CHANGE',
+          'hidden_fields 只能设置当前视图列内的字段；未加入视图的字段不能通过隐藏列显示或隐藏。',
+          { view_id: viewId, field_ids: outside });
+      }
+    }
     if (patch.kanban?.card_fields !== undefined) {
       const columns = rawColumnOrder(raw);
       const card = new Set(patch.kanban.card_fields);

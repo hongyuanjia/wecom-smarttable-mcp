@@ -43,6 +43,7 @@ export function validateWidths(widths: Record<string, number>, fieldIds: readonl
 // 计划、执行回读和核验必须从同一入口读取，否则同一视图会得到不同隐藏集合。
 export interface HiddenFieldExtraction {
   hidden_fields: string[];
+  absent_fields: string[];
   source: 'declared' | 'width_flags' | 'absent_from_columns';
 }
 
@@ -51,17 +52,20 @@ export function extractHiddenFields(view: Raw, fieldIds: readonly string[]): Hid
   const known = new Set(fieldIds);
   const columns = Array.isArray(properties.k2)
     ? properties.k2.filter((id: unknown): id is string => typeof id === 'string') : [];
+  const columnSet = new Set(columns);
+  const absent_fields = fieldIds.filter(id => !columnSet.has(id));
   const declared = Array.isArray(properties.k1)
-    ? properties.k1.filter((id: unknown): id is string => typeof id === 'string' && known.has(id)) : [];
-  if (declared.length) return { hidden_fields: declared, source: 'declared' };
+    ? properties.k1.filter((id: unknown): id is string => typeof id === 'string' && known.has(id) && columnSet.has(id)) : [];
+  if (declared.length) return { hidden_fields: declared, absent_fields, source: 'declared' };
   const widthFlags: string[] = [];
   if (properties.k5 && typeof properties.k5 === 'object') {
     for (const [id, info] of Object.entries(properties.k5)) {
-      if (info && typeof info === 'object' && (info as Raw).k2 === true && known.has(id)) widthFlags.push(id);
+      if (info && typeof info === 'object' && (info as Raw).k2 === true && known.has(id) && columnSet.has(id)) widthFlags.push(id);
     }
   }
-  if (widthFlags.length) return { hidden_fields: widthFlags, source: 'width_flags' };
-  return { hidden_fields: fieldIds.filter(id => !columns.includes(id)), source: 'absent_from_columns' };
+  if (widthFlags.length) return { hidden_fields: widthFlags, absent_fields, source: 'width_flags' };
+  // 未加入视图的字段不是“可显示/隐藏”的列，不能混入 hidden_fields。
+  return { hidden_fields: [], absent_fields, source: 'absent_from_columns' };
 }
 
 // actual 为回读现状，expected 为目标；顺序不产生差异，只报告缺少/多出的具体字段。

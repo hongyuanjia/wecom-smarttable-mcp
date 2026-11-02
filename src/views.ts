@@ -49,6 +49,7 @@ export interface NormalizedView {
   columns: string[];
   visible_columns: string[];
   hidden_fields: string[];
+  absent_fields: string[];
   hidden_fields_source: 'declared' | 'width_flags' | 'absent_from_columns';
   unknown_columns: string[];
   widths: Record<string, number>;
@@ -177,6 +178,7 @@ export function normalizeView(view: Raw, fields: NormalizedField[], personalFilt
     columns,
     visible_columns: visibleColumns,
     hidden_fields: hiddenFields,
+    absent_fields: hidden.absent_fields,
     hidden_fields_source: hiddenFieldsSource,
     unknown_columns: unknownColumns,
     widths,
@@ -446,6 +448,13 @@ export function planViewWrite(input: {
       : validateCreateFieldSelection(patch.field_order, input.fields.map(field => field.id));
   } else effective.columns = existing?.columns ?? input.fields.map(field => field.id);
   if (patch.hidden_fields !== undefined) {
+    const columns = new Set(effective.columns as string[]);
+    const outside = patch.hidden_fields.filter(id => !columns.has(id));
+    if (outside.length) {
+      throw new WecomError('UNSUPPORTED_VIEW_CHANGE',
+        'hidden_fields 只能设置当前视图列内的字段；未加入视图的字段不能通过隐藏列显示或隐藏。',
+        { view_id: existing?.id, field_ids: outside });
+    }
     effective.hidden_fields = patch.hidden_fields;
   } else effective.hidden_fields = existing?.hidden_fields ?? [];
   if (patch.widths !== undefined) {
@@ -580,6 +589,14 @@ export function buildViewObject(input: {
   const hidden = new Set(input.patch.hidden_fields || []);
   // 新建视图使用独立的字段选择契约：允许选择全表字段的子集，但不允许重复或混入其他表字段。
   const requested = validateCreateFieldSelection(input.patch.field_order || fieldIds, fieldIds);
+  if (input.type !== 'kanban') {
+    const outside = [...hidden].filter(id => !requested.includes(id));
+    if (outside.length) {
+      throw new WecomError('INVALID_ARGUMENT',
+        '新建视图的 hidden_fields 只能包含在本次选择的列中；未选择的字段不是隐藏列。',
+        { field_ids: outside });
+    }
+  }
   const columns = (input.type === 'kanban' && input.patch.kanban
     ? input.patch.kanban.card_fields
     : requested.filter(id => !hidden.has(id)));
