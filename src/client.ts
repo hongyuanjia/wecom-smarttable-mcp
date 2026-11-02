@@ -283,7 +283,8 @@ export class WecomClient {
       ignored_url_view_id: doc.url.searchParams.get('viewId'), scope: 'matching_records_accessible_to_current_user',
       total_matching_records: result.total, returned_count: result.records.length,
       columns,
-      records: result.records.map(row => presentRecord(source, schema, row, doc.id, selected, includeFragments)),
+      records: result.records.map(row => presentRecord(source, schema, row, doc.id, selected, includeFragments,
+        { read_path: 'query', revision: first.revision })),
       text_fragments_included: includeFragments,
       has_more: result.hasMore, next_cursor: result.hasMore ? Buffer.from(JSON.stringify({ v: 4, document_id: doc.id,
         sheet_id: sheetId, revision: first.revision, fingerprint, fields: selected, offset, token: result.nextCursor,
@@ -335,7 +336,8 @@ export class WecomClient {
     const selected: string[] = fields || schema.fields.map(field => field.id);
     const columns = selectFields(schema, selected);
     const pageRows = sorted.slice(offset, offset + pageSize);
-    const records = pageRows.map(row => presentRecord(page, schema, row, doc.id, selected, includeTextFragments));
+    const records = pageRows.map(row => presentRecord(page, schema, row, doc.id, selected, includeTextFragments,
+      { read_path: 'view', revision: firstRevision }));
     const nextOffset = offset + records.length < sorted.length ? offset + records.length : null;
     return {
       document_id: doc.id, sheet_id: sheetId, sheet_name: sheet.name, revision: firstRevision,
@@ -365,7 +367,8 @@ export class WecomClient {
     const selected: string[] = fields || position?.fields || schema.fields.map(f => f.id);
     const columns = selectFields(schema, selected);
     const includeFragments = includeTextFragments ?? position?.include_text_fragments ?? false;
-    const records = chunk.records.map(row => presentRecord(chunk, schema, row, doc.id, selected, includeFragments));
+    const records = chunk.records.map(row => presentRecord(chunk, schema, row, doc.id, selected, includeFragments,
+      { read_path: 'whole_table', revision: chunk.revision }));
     const nextOffset = Math.min(chunk.end + 1, chunk.total);
     const hasMore = nextOffset < chunk.total;
     return { document_id: doc.id, sheet_id: sheetId, sheet_name: chunk.workbook.find(s => s.id === sheetId)?.name,

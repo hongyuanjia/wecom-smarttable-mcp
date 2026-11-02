@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
+import { runningBuild } from './build-info.js';
 import { requireData, WecomError } from './errors.js';
 import { parseMemberCell } from './members.js';
 
@@ -164,17 +166,36 @@ function derivedItem(item: Raw) {
   return output;
 }
 
-type DecodedDerived = { ok: true; parsed: Raw } | { ok: false; error: 'invalid_json' | 'missing_data' };
+type DecodedDerived = { ok: true; parsed: Raw } | { ok: false; error: 'invalid_json' | 'missing_data';
+  value: unknown; parsed: unknown; failure: FailurePosition };
+
+interface FailurePosition { position: number | null; line: number | null; column: number | null }
+
+// 仅从 JSON.parse 的错误信息读取位置，不保留错误消息本身（可能包含原始片段）。
+function failurePosition(error: unknown): FailurePosition {
+  const message = error instanceof Error ? error.message : '';
+  const position = /position (\d+)/.exec(message);
+  const line = /line (\d+)/.exec(message);
+  const column = /column (\d+)/.exec(message);
+  return { position: position ? Number(position[1]) : null,
+    line: line ? Number(line[1]) : null, column: column ? Number(column[1]) : null };
+}
 
 // 第一步：只负责把不同原始形态解码为同一对象，不解释业务语义。
 function decodeDerivedPayload(value: unknown): DecodedDerived {
   let parsed: unknown = value;
   if (typeof value === 'string') {
-    try { parsed = JSON.parse(value); } catch { return { ok: false, error: 'invalid_json' }; }
+    try { parsed = JSON.parse(value); } catch (error) {
+      return { ok: false, error: 'invalid_json', value, parsed: null, failure: failurePosition(error) };
+    }
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false, error: 'missing_data' };
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'missing_data', value, parsed, failure: failurePosition(null) };
+  }
   const candidate = parsed as Raw;
-  if (!Array.isArray(candidate.data) && !Array.isArray(candidate.items)) return { ok: false, error: 'missing_data' };
+  if (!Array.isArray(candidate.data) && !Array.isArray(candidate.items)) {
+    return { ok: false, error: 'missing_data', value, parsed, failure: failurePosition(null) };
+  }
   return { ok: true, parsed: candidate };
 }
 
@@ -216,16 +237,100 @@ function normalizeDerived(parsed: Raw): Raw {
   };
 }
 
-function parseError(error: 'invalid_json' | 'missing_data', source: 'k36.k1' | 'k3601', alternateValid = false) {
+export interface DerivedContext {
+  read_path?: 'whole_table' | 'query' | 'view' | 'write_verification' | 'unknown';
+  revision?: number;
+  document_id?: string;
+  sheet_id?: string;
+  field_id?: string;
+  field_type?: string;
+  field_type_code?: number;
+}
+
+const diagnosticsSnippetLimit = 160;
+
+// 只有显式开启本地诊断模式才保存片段；默认只保留哈希与长度。
+function localDiagnosticsEnabled() {
+  return ['1', 'true', 'yes'].includes((process.env.WECOM_MCP_DIAGNOSTICS || '').trim().toLowerCase());
+}
+
+// 脱敏顺序：先去掉链接与人员/凭据字段，再抹掉长 token，最后才截断。
+function redactDiagnosticText(text: string) {
+  return text
+    .replace(/https?:\/\/[^\s"'<>\\]+/gi, '[url]')
+    .replace(/"(name|memberName|userName|avatarUrl|avatar_url|phone|email)"\s*:\s*"[^"]*"/gi, '"$1":"[redacted]"')
+    .replace(/"(sid|wedoc_sid|wedoc_xsrf|token|access_token|cookie|signature|secret|password|key)"\s*:\s*"[^"]*"/gi,
+      '"$1":"[redacted]"')
+    .replace(/\b(sid|wedoc_sid|wedoc_xsrf|access_token|signature|secret|password)=[^\s,;&"']+/gi, '$1=[redacted]')
+    .replace(/[A-Za-z0-9_-]{32,}/g, '[redacted]');
+}
+
+function diagnosticsSnippet(text: string) {
+  const redacted = redactDiagnosticText(text);
+  return { text: redacted.slice(0, diagnosticsSnippetLimit), limit: diagnosticsSnippetLimit,
+    truncated: redacted.length > diagnosticsSnippetLimit, redacted: true };
+}
+
+// 合法但结构不符的 payload 仍可能带有 formatterType，失败时一并记录上下文。
+function formatterContext(parsed: unknown) {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const record = parsed as Raw;
+  if (typeof record.formatterType === 'number') return record.formatterType;
+  const first = Array.isArray(record.data) ? record.data[0] : Array.isArray(record.items) ? record.items[0] : undefined;
+  return first && typeof first.formatterType === 'number' ? first.formatterType : null;
+}
+
+function buildIdentity() {
+  try { const build = runningBuild(); return { build_id: build.build_id, build_commit: build.build_commit }; }
+  catch { return { build_id: 'unknown', build_commit: 'unknown' }; }
+}
+
+function parseDiagnostics(decoded: Extract<DecodedDerived, { ok: false }>, source: 'k36.k1' | 'k3601',
+  context: DerivedContext) {
+  // 字符串按原样计长度与哈希；对象/数组按稳定序列化计算，避免键顺序造成指纹漂移。
+  const serialized = typeof decoded.value === 'string' ? decoded.value : stableDerived(decoded.value) ?? '';
+  const enabled = localDiagnosticsEnabled();
+  return {
+    read_path: context.read_path || 'unknown',
+    revision: context.revision ?? null,
+    document_id: context.document_id ?? null,
+    sheet_id: context.sheet_id ?? null,
+    field_id: context.field_id ?? null,
+    field_type: context.field_type ?? null,
+    field_type_code: context.field_type_code ?? null,
+    formatter_type: formatterContext(decoded.parsed),
+    source,
+    failure: decoded.error,
+    raw_type: decoded.value === null ? 'null' : Array.isArray(decoded.value) ? 'array' : typeof decoded.value,
+    raw_length: serialized.length,
+    raw_sha256: createHash('sha256').update(serialized).digest('hex'),
+    failure_position: decoded.failure.position,
+    failure_line: decoded.failure.line,
+    failure_column: decoded.failure.column,
+    ...buildIdentity(),
+    raw_content_included: enabled,
+    ...(enabled ? { raw_snippet: diagnosticsSnippet(serialized) } : {}),
+  };
+}
+
+function parseError(decoded: Extract<DecodedDerived, { ok: false }>, source: 'k36.k1' | 'k3601',
+  context: DerivedContext = {}, alternateValid = false) {
   return { status: 'parse_error', value: null, result_type: null, computed_result: null, items: [],
-    parse_error: error, parse_error_source: source, ...(alternateValid ? { alternate_valid: true } : {}) };
+    parse_error: decoded.error, parse_error_source: source, ...(alternateValid ? { alternate_valid: true } : {}),
+    parse_diagnostics: parseDiagnostics(decoded, source, context) };
+}
+
+// 首选来源可用但旧来源解析失败时，失败诊断同样可定位，不改变字段整体成功状态。
+function alternateParseError(decoded: Extract<DecodedDerived, { ok: false }>, context: DerivedContext) {
+  return { source: 'k3601', parse_error: decoded.error,
+    parse_diagnostics: parseDiagnostics(decoded, 'k3601', context) };
 }
 
 // LOOKUP/FORMULA 的计算结果保存在 k36.k1（JSON 字符串），旧接口也使用 k3601（对象或字符串）。
 // 不能用 status=unresolved 代替：空结果、计算错误和待计算必须分别报告。
 // 优先级：k36.k1 存在且可解析时使用它；两源语义冲突时保留首选值并报告 source_conflict。
 // k36.k1 解析失败时不回退掩盖错误；只有 k36.k1 缺失时才使用 k3601。
-export function parseDerivedResult(cell: Raw | undefined) {
+export function parseDerivedResult(cell: Raw | undefined, context: DerivedContext = {}) {
   if (!cell) return null;
   const standard = cell.k36?.k1;
   const legacy = cell.k3601;
@@ -237,13 +342,13 @@ export function parseDerivedResult(cell: Raw | undefined) {
   const standardDecoded = hasStandard ? decodeDerivedPayload(standard) : null;
   const legacyDecoded = hasLegacy ? decodeDerivedPayload(legacy) : null;
   if (standardDecoded && !standardDecoded.ok) {
-    return { ...parseError(standardDecoded.error, 'k36.k1', Boolean(legacyDecoded?.ok)),
+    return { ...parseError(standardDecoded, 'k36.k1', context, Boolean(legacyDecoded?.ok)),
       ...(legacyDecoded && !legacyDecoded.ok
-        ? { alternate_parse_error: { source: 'k3601', parse_error: legacyDecoded.error } } : {}) };
+        ? { alternate_parse_error: alternateParseError(legacyDecoded, context) } : {}) };
   }
   const parsed = standardDecoded?.ok ? standardDecoded.parsed : legacyDecoded?.ok ? legacyDecoded.parsed : null;
   if (!parsed) {
-    if (legacyDecoded && !legacyDecoded.ok) return parseError(legacyDecoded.error, 'k3601');
+    if (legacyDecoded && !legacyDecoded.ok) return parseError(legacyDecoded, 'k3601', context);
     return cell.k36 ? { status: 'pending', value: null, result_type: null, computed_result: null } : null;
   }
   const normalized = normalizeDerived(parsed);
@@ -252,12 +357,12 @@ export function parseDerivedResult(cell: Raw | undefined) {
     normalized.source_conflict = { preferred: 'k36.k1', alternate: 'k3601' };
   } else if (standardDecoded?.ok && legacyDecoded && !legacyDecoded.ok) {
     // 首选来源可用，但另一来源解析失败也必须显式报告，不能静默丢弃。
-    normalized.alternate_parse_error = { source: 'k3601', parse_error: legacyDecoded.error };
+    normalized.alternate_parse_error = alternateParseError(legacyDecoded, context);
   }
   return normalized;
 }
 
-export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pick<Chunk, 'start' | 'end'>>, schema: Schema, row: { id: string; raw: Raw }, docId: string, selected: string[], includeTextFragments = false) {
+export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pick<Chunk, 'start' | 'end'>>, schema: Schema, row: { id: string; raw: Raw }, docId: string, selected: string[], includeTextFragments = false, context: DerivedContext = {}) {
   requireData((chunk.start === undefined) === (chunk.end === undefined), '附件定位器的整表分块范围不完整。');
   const location = chunk.start !== undefined && chunk.end !== undefined
     ? { chunk_start: chunk.start, chunk_size: chunk.end - chunk.start + 1 }
@@ -294,7 +399,9 @@ export function presentRecord(chunk: Pick<Chunk, 'sheetId' | 'raw'> & Partial<Pi
         namespace_status: member.namespace_status, ...(member.unresolved.length ? { unresolved_members: member.unresolved } : {}) };
     } else if ([19, 20].includes(field.type_code)) {
       // FORMULA/LOOKUP 的 k36 标准单元格：保留返回类型、成员/选项引用及错误/空/待计算状态。
-      values[field.id] = parseDerivedResult(cell) ?? { status: cell ? 'unresolved' : 'not_returned', value: null,
+      values[field.id] = parseDerivedResult(cell, { ...context, document_id: context.document_id ?? docId,
+        sheet_id: context.sheet_id ?? chunk.sheetId, field_id: field.id, field_type: field.type,
+        field_type_code: field.type_code }) ?? { status: cell ? 'unresolved' : 'not_returned', value: null,
         result_type: null, computed_result: null };
     } else {
       const value = cell?.[`k${field.type_code}`];
