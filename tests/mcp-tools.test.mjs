@@ -75,6 +75,34 @@ test('真实 stdio MCP 公布三十三个工具，新写入口按能力矩阵拒
     assert.ok(capabilities.structuredContent.capabilities.some(item => item.id === 'member.directory.search' && item.status === 'verified'));
     assert.ok(capabilities.structuredContent.field_types.some(item => item.type === 'USER' && item.write_cell === 'verified'));
 
+    // 构建指纹：能力响应必须能证明实际进程来自哪份构建，且不夹带本机路径或凭据。
+    const build = capabilities.structuredContent.build;
+    assert.ok(build, 'wecom_capabilities 必须返回 build 构建标识');
+    assert.equal(typeof build.build_commit, 'string');
+    assert.ok(build.build_commit.length > 0);
+    assert.match(build.build_id, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(typeof build.package_version, 'string');
+    assert.ok(build.package_version.length > 0);
+    assert.equal(typeof build.output_schema_version, 'string');
+    assert.ok(build.output_schema_version.length > 0);
+    assert.equal(typeof build.derived_parser_version, 'string');
+    assert.ok(build.derived_parser_version.length > 0);
+    for (const [name, file] of [['entry', 'server.js'], ['protocol', 'protocol.js'], ['views', 'views.js'],
+      ['writer', 'writer.js'], ['planner', 'planner.js']]) {
+      assert.equal(build.modules[name].path, `dist/${file}`, name);
+      assert.match(build.modules[name].sha256, /^[0-9a-f]{64}$/, name);
+    }
+    const manifest = JSON.parse(await readFile(new URL('../dist/build-info.json', import.meta.url), 'utf8'));
+    assert.equal(build.build_id, manifest.build_id, '能力响应与构建清单必须是同一份指纹');
+    assert.equal(build.build_commit, manifest.build_commit);
+    assert.equal(build.modules.entry.sha256, manifest.modules.entry.sha256);
+    assert.equal(build.running.entry_sha256, manifest.modules.entry.sha256, '运行入口哈希必须与实际入口文件一致');
+    assert.equal(build.running.matches_build, true);
+    assert.ok(!Number.isNaN(Date.parse(build.running.started_at)));
+    const buildText = JSON.stringify(build);
+    assert.equal(/\/Users\/|\/home\/|[A-Za-z]:\\\\Users|https?:\/\//.test(buildText), false);
+    assert.equal(/(?:cookie|token|secret|password|scode=)/i.test(buildText), false);
+
     const search = await client.callTool({ name: 'wecom_search_members', arguments: { url, query: 'value_example_name' } });
     assert.equal(search.structuredContent.error.code, 'LOGIN_REQUIRED');
 

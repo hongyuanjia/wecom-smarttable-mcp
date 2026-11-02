@@ -27,7 +27,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/generate-build-info.mjs",
     "check": "tsc --noEmit",
     "start": "node dist/server.js",
     "login": "node dist/login.js",

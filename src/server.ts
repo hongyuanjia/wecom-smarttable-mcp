@@ -10,6 +10,7 @@ import { WecomWriter, WriteQueue } from './writer.js';
 import { columnTypes } from './mutations.js';
 import { documentReference, listExecutions, loadPlan, savePlan } from './local.js';
 import { EVIDENCE_DATE, EVIDENCE_SOURCE, capabilityError, capabilityMatrix, supportSummary } from './capabilities.js';
+import { runningBuild } from './build-info.js';
 import { resolveMemberNames, validateMemberReferences, type MemberCandidate } from './members.js';
 import { updateMemberCells } from './member-writer.js';
 import { planChanges, verifyChanges, type PlanChange } from './planner.js';
@@ -269,17 +270,19 @@ serveStdio(() => {
     (args, ctx) => run('wecom_delete_table', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).deleteTable(args, args.check_only) }), true));
 
   // ---- 能力、成员身份、视图读取与配置计划 ----
-  server.registerTool('wecom_capabilities', { description: '返回本机能力矩阵：每项功能的 verified/local_only/unavailable 状态、限制、前提与错误码，并逐类型说明识别/读配置/写配置/写单元格/读计算值。默认不联网；probe=true 且提供 url 时只读探测当前文档并返回真实子表版本。提供方写入未经许可或验证时保持线上原状。',
+  server.registerTool('wecom_capabilities', { description: '返回本机能力矩阵：每项功能的 verified/local_only/unavailable 状态、限制、前提与错误码，并逐类型说明识别/读配置/写配置/写单元格/读计算值。build 字段返回构建提交、模块哈希、输出结构版本与派生解析器版本，running.entry_sha256 为当前进程入口文件哈希。默认不联网；probe=true 且提供 url 时只读探测当前文档并返回真实子表版本。提供方写入未经许可或验证时保持线上原状。',
     annotations,
     inputSchema: z.strictObject({ url: url.optional(), sheet_id: id.optional(), probe: z.boolean().default(false).describe('只读探测当前文档；需要 url。') }) },
     (args, ctx) => {
       const localReport = () => ({
         generated_at: new Date().toISOString(), evidence_date: EVIDENCE_DATE, evidence_source: EVIDENCE_SOURCE,
+        build: runningBuild(),
         authentication: { method: 'personal_web_session_cookie', organization_approval: '当前读取复用用户本人网页登录态；未使用机器人/官方 CLI 路线',
           login_state: 'not_probed_this_call' },
         capabilities: capabilityMatrix(), field_types: supportSummary(),
         notes: [
           '能力状态只描述本机已有证据；官方文档中的参数存在不等同于当前账号/后端可用。',
+          'build 记录构建提交、关键模块哈希、输出结构版本与解析器版本；running.entry_sha256 是当前进程实际入口文件哈希，matches_build=false 说明运行文件与构建清单不一致。',
           '成员、视图（含列设置/删除）、字段属性、查找引用、单向关联、关联单元格、公式、子表操作和 URL 单元格写入已验证；双向关联、固定值条件和附件上传仍不可用。',
           '动态“我”已按人员字段 k35=true 写入并回读验证；实际筛选结果仍需至少两个授权账号人工核对。',
           '未识别的字段/视图原始设置保留，不参与自动覆盖。',
