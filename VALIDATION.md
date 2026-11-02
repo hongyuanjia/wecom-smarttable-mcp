@@ -181,9 +181,11 @@ URL 校验采用精确域名匹配：第一方鉴权下载仅允许已验证的�
 - 业务文档新增 `已完成事项数`（子任务实施安排 `fxVwQ5`）：目标年度表事项编号计数，条件为来源子任务编号=本表子任务编号、执行状态=固定值“已完成”；19 条记录逐条回读一致，当前均为 0，因为年度表 100 条执行状态为空。四表版本 432，记录数仍为 9/19/149/100，成员 296/296、关联 337/337。
 - 派生字段读取：`wecom_read_records` 已解析 LOOKUP/FORMULA 的 `k36` 标准单元格，返回 `present/empty/pending/error`、`result_type`、`formatter_type`、成员/选项引用、`computed_result`、样本值和错误。业务表实测：年度事项数 6、已完成事项数 0、细化编制负责人“贾洪愿”、到期提示“待确定日期”均正确返回，不再显示为 unresolved。
 - 查找引用沿关联字段：`k20.k1=关联字段,k4=0,k5=''` 已真实创建；测试表把人员记录关联到任务后，引用值返回“任务一”。条件匹配新增零匹配/多匹配/空键诊断，`fail_on_ambiguous=true` 在目标键重复时返回 `LOOKUP_AMBIGUOUS` 且不创建字段。
-- 条件查询扩展：已验证 TEXT eq/ne/contains/not_contains、SINGLE_SELECT eq/ne、USER eq/ne（`valueUsers` 为字符串数组）、NUMBER 比较（`valueNumber`）、DATE 比较（`valueDateTime`）和 empty/not_empty。URL/电话/邮箱/复选框/关联记录的值比较因未取得可靠编码而明确拒绝，避免返回全表。
-- 视图作用域与并发：共享/锁定/个人 `k35=1/2/3` 可创建和切换；`editable` 按 scope 与 owner 计算；`config_digest` 使用稳定键排序，已验证跨 1 条/200 条分块读取一致，可用 `expected_view_digest` 阻止覆盖他人刚修改的视图。统计行只读取 `k10`，写入未找到可靠路径时拒绝。
+- 条件查询扩展：已验证 TEXT eq/ne/contains/not_contains、SINGLE_SELECT eq/ne、USER eq/ne（`valueUsers` 为字符串数组）、NUMBER 比较（`valueNumber`）、DATE 比较（`valueDateTime`）、PROGRESS（`valueProgress` 数字）、URL（`valueUrl` 字符串）、电话（`valuePhoneNumber` 字符串）、邮箱（`valueEmail` 字符串）、复选框（`valueCheckbox` 布尔值）、多选（`valueSelects` 选项 ID 数组）以及 empty/not_empty。单项/双向关联没有记录 ID 过滤，按被关联记录标题文本（`filterKeyType=1` + `valueText`）做 eq/ne/contains/not_contains 和 empty/not_empty。
+- 查询值的本地校验：真实抓包确认错误的值键名会被服务端静默忽略并返回全表（如 URL 传 `valueUrls`），错误的 JSON 类型才会返回 `business_code 1`；因此工具在发出请求前严格校验值键和类型，不依赖服务端报错。
+- 视图作用域与并发：共享/锁定/个人 `k35=1/2/3` 可创建和切换；`editable` 按 scope 与 owner 计算；`config_digest` 使用稳定键排序，已验证跨 1 条/200 条分块读取一致，可用 `expected_view_digest` 阻止覆盖他人刚修改的视图。字段统计标志通过命令 `3025`（`{1:sheetId, 2:viewId, 3:{1:boolean}}`）写入并回读 `k1.k10`；`k10` 是字段统计启用标志，不是底部统计行显隐，当前 PC build 没有用户可见入口，3025 属于内部命令路径。
 - 执行日志与部分成功：每次提交生成 `execution_id` 并写入本机 `executions/`（0600），写入工具可带可选 `plan_id`，`wecom_list_executions` 可按 document_id 与 plan_id 读取；每个文档默认保留最近 1000 条，保存时清理最旧条目；多步视图更新中途失败返回 `PARTIAL_APPLY` 和已完成步骤；附件上传成功但单元格写入失败也返回 `PARTIAL_APPLY`，避免重复上传。
 - 直接写入校验：直接创建/更新公式与计划工具共用函数登记、参数数量、类型、声明依赖、依赖冲突和循环校验，失败返回 `FORMULA_INVALID`/`FORMULA_TYPE_MISMATCH`/`FIELD_DEPENDENCY_CONFLICT` 且不提交写入；直接创建同名视图按规范化配置返回 no-op（`no_changes=true`）、`VIEW_CONFIG_DIFF` 或 `VIEW_AMBIGUOUS`，不再静默覆盖。
 - 业务文档新增 `年度事项完成率`（子任务实施安排 `fRrFq3`）：`IF(年度事项数=0,"",已完成事项数/年度事项数)`，百分数格式；19 条记录逐条核对，当前均为 0%，与已完成事项数=0 一致。四表版本 433，记录数 9/19/149/100，成员 296/296、关联 337/337、完成率 19/19。
-- 已知限制：文本字段 `COUNTIF` 服务端报 errorType 4；`COALESCE`/`PERCENT` 未取得可用编码；URL/电话/邮箱/复选框/关联记录的值比较查询未验证；视图统计行写入未验证；个人视图的跨账号可见性、动态“我”的其他账号实际筛选结果仍需人工核对；年度表 100 条日期/状态源数据为空，公式当前均为“待确定日期”。
+- 已知限制：文本字段 `COUNTIF` 服务端报 errorType 4，`COALESCE`/`PERCENT` 服务端报 errorType 8「不识别的内容」，均在写入前拒绝；关联/双向关联只能按被关联记录标题文本筛选和 empty/not_empty，不能按记录 ID 过滤；逐列统计 3019 的持久化读写不在本轮范围；个人视图的跨账号可见性、动态“我”的其他账号实际筛选结果仍需人工核对；年度表 100 条日期/状态源数据为空，公式当前均为“待确定日期”。
+- 本轮同步校验：版本 `0.9.0`，MCP 工具 33 个；`npm run check`、**100 项**离线测试、`npm run check:public` 全部通过。
