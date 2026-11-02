@@ -282,6 +282,89 @@ function validateFieldList(ids: string[], fields: Map<string, NormalizedField>, 
   for (const id of ids) if (!fields.has(id)) throw new WecomError('UNKNOWN_FIELD', `${label}包含不存在或不可读取的字段。`, { field_id: id });
 }
 
+function comparableFilter(filter: NormalizedView['filter']) {
+  if (!filter) return null;
+  return {
+    conjunction: filter.conjunction,
+    conditions: filter.conditions.map(condition => ({
+      field_id: condition.field_id,
+      operator_code: condition.operator_code,
+      value: condition.value,
+      dynamic_viewer: condition.dynamic_viewer,
+    })),
+  };
+}
+
+function normalizedConfigDifferences(existing: NormalizedView, expected: NormalizedView) {
+  const differences: { path: string; before: unknown; after: unknown }[] = [];
+  const push = (path: string, before: unknown, after: unknown) => {
+    if (!compare(before, after)) differences.push({ path, before, after });
+  };
+  push('type', existing.type, expected.type);
+  push('scope', existing.scope, expected.scope);
+  push('columns', existing.columns, expected.columns);
+  push('hidden_fields', existing.hidden_fields, expected.hidden_fields);
+  push('widths', stableObject(existing.widths), stableObject(expected.widths));
+  push('group', placement(existing.group), placement(expected.group));
+  push('sort', placement(existing.sort), placement(expected.sort));
+  push('filter', comparableFilter(existing.filter), comparableFilter(expected.filter));
+  push('frozen_field_count', existing.frozen_field_count, expected.frozen_field_count);
+  push('statistics', existing.statistics_enabled, expected.statistics_enabled);
+  push('auto_sort', existing.auto_sort, expected.auto_sort);
+  return differences;
+}
+
+export interface CreateViewComparison {
+  decision: 'skip' | 'conflict';
+  view_id: string;
+  name: string;
+  differences: { path: string; before: unknown; after: unknown }[];
+}
+
+function rawViewFromBuilt(built: Raw): Raw {
+  const properties = built['1'] || {};
+  const condition = (item: Raw) => {
+    const type = item['31'];
+    const mapped: Raw = { k30: item['30'], k31: type, k32: item['32'], k33: item['33'], k35: item['35'] };
+    if (item[String(type)] !== undefined) mapped[`k${type}`] = item[String(type)];
+    return mapped;
+  };
+  const placement = (items: Raw[] | undefined) => (items || []).map(item => ({ k1: item['1'], k2: item['2'] }));
+  return {
+    k30: built['30'], k31: built['31'], k32: built['32'], k33: built['33'], k34: built['34'], k35: built['35'],
+    k1: {
+      k1: properties['1'], k2: properties['2'], k3: properties['3'], k4: properties['4'],
+      k5: Object.fromEntries(Object.entries(properties['5'] || {}).map(([id, info]: [string, any]) =>
+        [id, { k1: info['1'], k2: info['2'] }])),
+      k6: properties['6'],
+      k7: placement(properties['7']),
+      k8: properties['8'] ? { k1: properties['8']['1'], k2: (properties['8']['2'] || []).map(condition) } : null,
+      k9: placement(properties['9']),
+      k10: properties['10'],
+    },
+  };
+}
+
+// 直接创建与计划工具共用同名比较：用相同默认值生成“将要创建”的规范化配置，再与已有视图逐项比较。
+export function compareCreateView(input: {
+  patch: ViewWriteInput;
+  views: NormalizedView[];
+  fields: NormalizedField[];
+}): CreateViewComparison | null {
+  const name = input.patch.name;
+  if (!name) throw new WecomError('INVALID_ARGUMENT', '新建视图需要名称。');
+  const sameName = input.views.filter(view => view.name === name);
+  if (sameName.length > 1) throw new WecomError('VIEW_AMBIGUOUS', '存在多个同名视图，必须用 view_id 定位后再修改。', {
+    name, view_ids: sameName.map(view => view.id) });
+  if (!sameName.length) return null;
+  const expected = normalizeView(rawViewFromBuilt(buildViewObject({
+    viewId: 'v_create_compare', name, type: input.patch.type || 'grid', actorUid: 'local_compare',
+    recordIds: [], fields: input.fields, patch: input.patch,
+  })), input.fields);
+  const differences = normalizedConfigDifferences(sameName[0], expected);
+  return { decision: differences.length ? 'conflict' : 'skip', view_id: sameName[0].id, name, differences };
+}
+
 export function planViewWrite(input: {
   action: 'create' | 'update';
   view_id?: string;
@@ -321,14 +404,15 @@ export function planViewWrite(input: {
 
   // 同名视图处理：唯一且配置相同则跳过，配置不同先给差异，多个同名必须用 ID 定位。
   if (input.action === 'create') {
-    const sameName = input.views.filter(view => view.name === name);
-    if (sameName.length > 1) throw new WecomError('VIEW_AMBIGUOUS', '存在多个同名视图，必须用 view_id 定位后再修改。', {
-      name, view_ids: sameName.map(view => view.id) });
-    if (sameName.length === 1) {
-      return { action: 'create', decision: 'conflict', view_id: sameName[0].id, name,
-        differences: [{ path: 'name', before: sameName[0].name, after: name }],
-        effective: {}, preserves_unknown_settings: true, requires_provider_capability: 'view.create', comparable: false,
-        notes: ['同名视图已存在；配置比较受未解释的筛选/看板字段限制，需人工确认或改用 view_id 更新。'] };
+    const comparison = compareCreateView({ patch, views: input.views, fields: input.fields });
+    if (comparison) {
+      return { action: 'create', decision: comparison.decision, view_id: comparison.view_id, name,
+        differences: comparison.differences,
+        effective: {}, preserves_unknown_settings: true, requires_provider_capability: 'view.create',
+        comparable: comparison.decision === 'skip',
+        notes: comparison.decision === 'skip'
+          ? ['同名视图的规范化配置与本次创建请求一致；直接创建应返回已有视图且不写入。']
+          : ['同名视图的规范化配置与本次创建请求不同；必须改用 view_id 更新，不能静默覆盖。'] };
     }
   }
 

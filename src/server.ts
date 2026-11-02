@@ -31,7 +31,9 @@ const revision = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).describe('
 const cell = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.array(id).max(500), z.null()]);
 const values = z.record(id, cell).refine(value => Object.keys(value).length <= 500, '单条记录最多 500 个字段。');
 const valuesDescription = '字段 ID 到单元格值的映射。支持文本/电话/邮箱字符串、数字、布尔值、毫秒时间戳、0–1 进度、已有选项 ID 数组，null 清空；不支持图片/附件、人员、URL、关联和派生字段。';
-const tableChange = { url, sheet_id: id, expected_revision: revision };
+const tableChange = { url, sheet_id: id, expected_revision: revision,
+  plan_id: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('可选：关联的本地计划 ID；写入执行日志会记录并按计划筛选。'),
+};
 const includeTextFragments = z.boolean().optional().describe('默认 false，省略原始富文本片段以减少返回量；需片段时设 true，后续页省略则沿用游标设置。');
 
 // 新能力的输入契约。复杂对象均采用 strictObject，避免把提供方内部格式暴露成任意参数。
@@ -218,31 +220,32 @@ serveStdio(() => {
   server.registerTool('wecom_upload_asset', { description: '把本机文件上传到图片/附件字段并写入记录单元格，按文件名、大小、MD5 和文件标识回读核对；单文件不超过 50 MiB。',
     annotations: { ...writeAnnotations, destructiveHint: false },
     inputSchema: z.strictObject({ url, sheet_id: id, expected_revision: revision, field_id: id, record_id: id,
+      plan_id: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('可选：关联的本地计划 ID。'),
       file_path: z.string().trim().min(1).max(4096).describe('本机文件路径。'),
       view_id: id.optional().describe('上传定位视图；省略时自动选择包含该字段的视图。') }) },
     (args, ctx) => run('wecom_upload_asset', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .uploadAsset(args.url, args.sheet_id, args.expected_revision, args.field_id, args.record_id, args.file_path, args.view_id) }), true));
+      .uploadAsset(args.url, args.sheet_id, args.expected_revision, args.field_id, args.record_id, args.file_path, args.view_id, args.plan_id) }), true));
   server.registerTool('wecom_create_table', { description: '在个人目录新建智能表格（无需已有链接），返回新表链接及企微默认生成的子表、字段与初始记录数，不会自动清空默认内容。',
     annotations: { ...writeAnnotations, destructiveHint: false }, inputSchema: z.strictObject({ title: z.string().trim().min(1).max(128) }) },
     (args, ctx) => run('wecom_create_table', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).createTable(args.title) }), true));
   server.registerTool('wecom_update_records', { description: '按 record_id 修改指定字段并回读校验；未传入的字段保持原值。',
     annotations: writeAnnotations, inputSchema: z.strictObject({ ...tableChange,
       records: z.array(z.strictObject({ record_id: id, values: values.describe(valuesDescription) })).min(1).max(100) }) },
-    (args, ctx) => run('wecom_update_records', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).updateRecords(args.url, args.sheet_id, args.expected_revision, args.records) }), true));
+    (args, ctx) => run('wecom_update_records', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).updateRecords(args.url, args.sheet_id, args.expected_revision, args.records, args.plan_id) }), true));
   server.registerTool('wecom_add_records', { description: '在子表末尾追加记录并回读校验，返回新记录 ID；传入空对象可创建空行。',
     annotations: { ...writeAnnotations, destructiveHint: false }, inputSchema: z.strictObject({ ...tableChange, records: z.array(values).min(1).max(100).describe(valuesDescription) }) },
-    (args, ctx) => run('wecom_add_records', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).addRecords(args.url, args.sheet_id, args.expected_revision, args.records) }), true));
+    (args, ctx) => run('wecom_add_records', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).addRecords(args.url, args.sheet_id, args.expected_revision, args.records, args.plan_id) }), true));
   server.registerTool('wecom_delete_records', { description: '按 record_id 删除用户明确指定的记录并整表回读校验；读取范围不受 URL 视图筛选限制。',
     annotations: writeAnnotations, inputSchema: z.strictObject({ ...tableChange, record_ids: z.array(id).min(1).max(100) }) },
-    (args, ctx) => run('wecom_delete_records', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).deleteRecords(args.url, args.sheet_id, args.expected_revision, args.record_ids) }), true));
+    (args, ctx) => run('wecom_delete_records', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).deleteRecords(args.url, args.sheet_id, args.expected_revision, args.record_ids, args.plan_id) }), true));
   server.registerTool('wecom_add_fields', { description: '在子表末尾新增普通列并回读校验，返回字段 ID。单选/多选可通过 options 设置选项名；不支持新建关联、公式等复杂列。',
     annotations: { ...writeAnnotations, destructiveHint: false }, inputSchema: z.strictObject({ ...tableChange,
       fields: z.array(z.strictObject({ name: z.string().trim().min(1).max(128), type: z.enum(Object.keys(columnTypes) as (keyof typeof columnTypes)[]),
         options: z.array(z.string().trim().min(1).max(128)).max(100).optional() })).min(1).max(20) }) },
-    (args, ctx) => run('wecom_add_fields', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).addFields(args.url, args.sheet_id, args.expected_revision, args.fields) }), true));
+    (args, ctx) => run('wecom_add_fields', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).addFields(args.url, args.sheet_id, args.expected_revision, args.fields, args.plan_id) }), true));
   server.registerTool('wecom_delete_fields', { description: '按 field_id 删除用户指定的列及列内数据；标题列（is_primary）不支持删除。普通列、查找引用、单向关联和公式字段均已验证。',
     annotations: writeAnnotations, inputSchema: z.strictObject({ ...tableChange, field_ids: z.array(id).min(1).max(20) }) },
-    (args, ctx) => run('wecom_delete_fields', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).deleteFields(args.url, args.sheet_id, args.expected_revision, args.field_ids) }), true));
+    (args, ctx) => run('wecom_delete_fields', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal).deleteFields(args.url, args.sheet_id, args.expected_revision, args.field_ids, args.plan_id) }), true));
   server.registerTool('wecom_create_sheet', { description: '在现有文档中通过 HTTP 3001 新建一个智能表子表，并回读核对名称与 ID；新表使用企业微信默认字段。',
     annotations: { ...writeAnnotations, destructiveHint: false },
     inputSchema: z.strictObject({ url, expected_revision: revision, title: z.string().trim().min(1).max(128) }) },
@@ -366,29 +369,29 @@ serveStdio(() => {
       }
       return run('wecom_update_member_cells', args, ctx, async client => ({ result: await updateMemberCells(client, {
         url: args.url, sheetId: args.sheet_id, expectedRevision: args.expected_revision,
-        notifyMembers: args.notify_members, updates: args.updates,
+        notifyMembers: args.notify_members, updates: args.updates, planId: args.plan_id,
       }, ctx.mcpReq.signal) }), true);
     });
-  server.registerTool('wecom_create_view', { description: '通过 HTTP commitchanges 新建表格/看板等视图，配置 scope（shared 公共 / locked 锁定 / personal 个人）、筛选、排序、分组、列顺序、隐藏列、列宽与看板卡片；支持动态“我”（人员字段 k35=true）。同名视图会拒绝并提示用 view_id 更新。',
+  server.registerTool('wecom_create_view', { description: '通过 HTTP commitchanges 新建表格/看板等视图，配置 scope（shared 公共 / locked 锁定 / personal 个人）、筛选、排序、分组、列顺序、隐藏列、列宽与看板卡片；支持动态“我”（人员字段 k35=true）。同名视图按规范化配置比较：完全相同返回已有视图且 no_changes=true，配置不同返回 VIEW_CONFIG_DIFF 并要求用 view_id 更新，多个同名返回 VIEW_AMBIGUOUS；不会自动覆盖。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, view: viewPatch.refine(value => Boolean(value.name), '新建视图需要 name。') }) },
     (args, ctx) => run('wecom_create_view', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .createView(args.url, args.sheet_id, args.expected_revision, args.view) }), true));
+      .createView(args.url, args.sheet_id, args.expected_revision, args.view, args.plan_id) }), true));
   server.registerTool('wecom_update_view', { description: '按 view_id 通过 HTTP 修改视图名称、scope（shared/locked/personal）、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列和看板卡片字段；省略的属性保持原值，filter:null 才表示清除筛选。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, view_id: id, patch: viewPatch }) },
     (args, ctx) => run('wecom_update_view', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .updateView(args.url, args.sheet_id, args.expected_revision, args.view_id, args.patch) }), true));
+      .updateView(args.url, args.sheet_id, args.expected_revision, args.view_id, args.patch, args.plan_id) }), true));
   server.registerTool('wecom_delete_view', { description: '按 view_id 通过 HTTP 3007 删除共享视图，写后回读核对；至少保留一个视图。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, view_id: id }) },
     (args, ctx) => run('wecom_delete_view', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .deleteView(args.url, args.sheet_id, args.expected_revision, args.view_id) }), true));
+      .deleteView(args.url, args.sheet_id, args.expected_revision, args.view_id, args.plan_id) }), true));
   server.registerTool('wecom_update_fields', { description: '通过 HTTP 3017 更新字段属性：重命名、人员字段是否多选、添加时是否通知；写后回读核对。标题列可重命名但保留标题列身份。其他字段属性尚未验证。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, field_id: id, patch: fieldPatch }) },
     (args, ctx) => run('wecom_update_fields', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .updateFields(args.url, args.sheet_id, args.expected_revision, args.field_id, args.patch) }), true));
+      .updateFields(args.url, args.sheet_id, args.expected_revision, args.field_id, args.patch, args.plan_id) }), true));
   server.registerTool('wecom_create_lookup_field', { description: '通过 HTTP 3014/3017 创建查找引用字段：支持条件匹配（含文本/单选固定值）和沿关联字段引用两种模式，支持八种统计方式，并返回零匹配/多匹配诊断；fail_on_ambiguous=true 时匹配键多匹配会返回 LOOKUP_AMBIGUOUS。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, name: z.string().trim().min(1).max(128), lookup: lookupConfig }) },
@@ -418,7 +421,7 @@ serveStdio(() => {
       return { result: await new WecomWriter(client, ctx.mcpReq.signal).createLookupField(args.url, args.sheet_id,
         args.expected_revision, args.name, { target_sheet_id: lookup.target_sheet_id, target_field_id: lookup.target_field_id,
           relation_field_id: lookup.relation_field_id, fail_on_ambiguous: lookup.fail_on_ambiguous,
-          aggregation: lookup.aggregation as 'values' | 'unique' | 'sum' | 'count' | 'count_unique' | 'average' | 'max' | 'min', conditions }) };
+          aggregation: lookup.aggregation as 'values' | 'unique' | 'sum' | 'count' | 'count_unique' | 'average' | 'max' | 'min', conditions }, args.plan_id) };
     }, true));
   server.registerTool('wecom_create_relation_field', { description: '通过 HTTP 3014/3017 创建关联字段，指定目标子表与是否允许多选。two_way=true 时服务端会在目标表自动创建反向字段并同步两侧单元格。',
     annotations: writeAnnotations,
@@ -426,35 +429,36 @@ serveStdio(() => {
     (args, ctx) => run('wecom_create_relation_field', args, ctx, async client => {
       return { result: await new WecomWriter(client, ctx.mcpReq.signal).createRelationField(args.url, args.sheet_id,
         args.expected_revision, args.name, { target_sheet_id: args.relation.target_sheet_id, multiple: args.relation.multiple,
-          two_way: args.relation.two_way }) };
+          two_way: args.relation.two_way }, args.plan_id) };
     }, true));
   server.registerTool('wecom_update_relation_cells', { description: '通过 HTTP 3013 按稳定目标记录 ID 写入关联单元格（单向 18、双向 21），双向写入会请求服务端同步反向单元格，并同时回读核对两侧；目标记录不存在时拒绝写入。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, field_id: id, updates: z.array(relationUpdate).min(1).max(100) }) },
     (args, ctx) => run('wecom_update_relation_cells', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .updateRelationCells(args.url, args.sheet_id, args.expected_revision, args.field_id, args.updates) }), true));
-  server.registerTool('wecom_create_formula_field', { description: '通过 HTTP 3014/3017 创建公式字段：结构化 AST 编码为网页公式 token（文本片段 + 字段引用），不使用 eval。已验证 IF/ISBLANK/TODAY/COUNT/COUNTA/COUNTIF（数值范围）/DATEDIF（按天）/CONCATENATE/ROUND、字段引用、比较与算术；format 支持 text/number/percent/currency/date/checkbox/email/progress 及小数位/千位符。配置保存与计算结果分开报告。',
+      .updateRelationCells(args.url, args.sheet_id, args.expected_revision, args.field_id, args.updates, args.plan_id) }), true));
+  server.registerTool('wecom_create_formula_field', { description: '通过 HTTP 3014/3017 创建公式字段：结构化 AST 编码为网页公式 token（文本片段 + 字段引用），不使用 eval。写入前与计划工具共用函数注册、参数数量、类型、声明依赖、依赖冲突和循环校验，失败返回 FORMULA_INVALID/FORMULA_TYPE_MISMATCH/FIELD_DEPENDENCY_CONFLICT 且不提交 HTTP 写入。已验证 IF/ISBLANK/TODAY/COUNT/COUNTA/COUNTIF（数值范围）/DATEDIF（按天）/CONCATENATE/ROUND、字段引用、比较与算术；format 支持 text/number/percent/currency/date/checkbox/email/progress 及小数位/千位符。配置保存与计算结果分开报告。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, name: z.string().trim().min(1).max(128), formula: formulaDefinition }) },
     (args, ctx) => run('wecom_create_formula_field', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .createFormulaField(args.url, args.sheet_id, args.expected_revision, args.name, args.formula as unknown as { expression: FormulaExpression; result_type: string; format?: string; dependencies?: string[] }) }), true));
-  server.registerTool('wecom_update_formula_field', { description: '通过 HTTP 3017 更新公式字段名称、表达式或展示格式；结构化 AST 编码为网页公式 token。配置保存与计算结果分开报告。',
+      .createFormulaField(args.url, args.sheet_id, args.expected_revision, args.name, args.formula as unknown as { expression: FormulaExpression; result_type: string; format?: string; dependencies?: string[] }, args.plan_id) }), true));
+  server.registerTool('wecom_update_formula_field', { description: '通过 HTTP 3017 更新公式字段名称、表达式或展示格式；结构化 AST 编码为网页公式 token。公式补丁在写入前执行与计划工具相同的函数、参数数量、类型、依赖冲突和循环校验；失败不提交写入。配置保存与计算结果分开报告。',
     annotations: writeAnnotations,
     inputSchema: z.strictObject({ ...tableChange, field_id: id, patch: z.strictObject({
       name: z.string().trim().min(1).max(128).optional(),
       formula: formulaDefinition.optional(),
     }).refine(value => Object.keys(value).length > 0, '至少需要 name 或 formula。') }) },
     (args, ctx) => run('wecom_update_formula_field', args, ctx, async client => ({ result: await new WecomWriter(client, ctx.mcpReq.signal)
-      .updateFormulaField(args.url, args.sheet_id, args.expected_revision, args.field_id, args.patch as unknown as { name?: string; formula?: { expression: FormulaExpression; result_type: string; format?: string; dependencies?: string[] } }) }), true));
+      .updateFormulaField(args.url, args.sheet_id, args.expected_revision, args.field_id, args.patch as unknown as { name?: string; formula?: { expression: FormulaExpression; result_type: string; format?: string; dependencies?: string[] } }, args.plan_id) }), true));
 
   // ---- 本地计划与线上回读核对 ----
-  server.registerTool('wecom_list_executions', { description: '读取本机执行日志：每次已提交的 HTTP 写入都会记录 execution_id、时间、文档/子表、操作、版本和 verified/not_verified 状态；可按 document_id 过滤。日志只含对象 ID 和版本，不含 Cookie、Token 或签名链接。',
+  server.registerTool('wecom_list_executions', { description: '读取本机执行日志：每次已提交的 HTTP 写入都会记录 execution_id、时间、文档/子表、操作、版本、可选 plan_id 和 verified/not_verified 状态；可按 document_id 和 plan_id 过滤。每个文档默认保留最近 1000 条（可用 WECOM_MCP_EXECUTION_RETENTION 调整），保存时清理最旧条目。日志只含对象 ID 和版本，不含 Cookie、Token 或签名链接。',
     annotations,
-    inputSchema: z.strictObject({ document_id: id.optional(), limit: z.number().int().min(1).max(200).default(50) }) },
+    inputSchema: z.strictObject({ document_id: id.optional(), plan_id: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+      limit: z.number().int().min(1).max(200).default(50) }) },
     (args, ctx) => run('wecom_list_executions', args, ctx, async () => {
-      const executions = await listExecutions(args.document_id, args.limit);
+      const executions = await listExecutions(args.document_id, args.limit, args.plan_id);
       return { result: { executions, count: executions.length,
-        note: '日志保存在本机数据目录 executions/，权限 600；只记录已发出提交请求的操作。' } };
+        note: '日志保存在本机数据目录 executions/，文件权限 600；每个文档默认保留最近 1000 条；只记录已发出提交请求的操作。' } };
     }));
   server.registerTool('wecom_plan_changes', { description: '只读生成配置变更计划：读取当前结构与人员单元格，校验目标、计算差异、依赖顺序、影响对象与能力前提，并把计划记录在本机（0600）。不提交任何写入。成员、视图、字段属性、查找引用（条件/固定值/沿关联字段/八种聚合）、单向与双向关联、关联单元格和公式的提供方写入已验证。重复执行相同配置应得到空差异。',
     annotations,

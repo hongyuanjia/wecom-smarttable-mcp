@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -71,16 +71,41 @@ export async function loadPlan(planId: string) {
 }
 
 
+// 每个文档默认保留最近 1000 条执行日志；可用环境变量下调或上调，旧条目在保存新日志后清理。
+export const EXECUTION_RETENTION_LIMIT = 1000;
+
+export function executionRetentionLimit(): number {
+  const configured = Number(process.env.WECOM_MCP_EXECUTION_RETENTION);
+  return Number.isInteger(configured) && configured > 0 ? configured : EXECUTION_RETENTION_LIMIT;
+}
+
+async function pruneExecutions(documentId: string, limit: number) {
+  const files = (await readdir(executionsPath)).filter(name => name.endsWith('.json'));
+  const entries: { file: string; timestamp: string }[] = [];
+  for (const file of files) {
+    try {
+      const value = JSON.parse(await readFile(join(executionsPath, file), 'utf8'));
+      if (value.document_id === documentId) entries.push({ file, timestamp: String(value.timestamp || '') });
+    } catch { /* ignore unreadable log entries */ }
+  }
+  if (entries.length <= limit) return;
+  entries.sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.file.localeCompare(right.file));
+  await Promise.all(entries.slice(0, entries.length - limit).map(entry => unlink(join(executionsPath, entry.file))));
+}
+
 export async function saveExecution(entry: Record<string, unknown>) {
   const executionId = `e${Date.now().toString(36)}${randomUUID().replace(/-/g, '').slice(0, 8)}`;
-  const value = { execution_id: executionId, timestamp: new Date().toISOString(), ...entry };
+  const value: Record<string, unknown> = { execution_id: executionId, timestamp: new Date().toISOString(), ...entry };
   await privateDirectory(executionsPath);
   const path = join(executionsPath, `${executionId}.json`);
   await writeFile(path, JSON.stringify(value), { flag: 'wx', mode: 0o600 });
+  if (typeof value.document_id === 'string') {
+    await pruneExecutions(value.document_id, executionRetentionLimit()).catch(() => {});
+  }
   return { execution_id: executionId, path };
 }
 
-export async function listExecutions(documentId?: string, limit = 50) {
+export async function listExecutions(documentId?: string, limit = 50, planId?: string) {
   try {
     const files = (await readdir(executionsPath)).filter(name => name.endsWith('.json')).sort().reverse();
     const entries: Record<string, unknown>[] = [];
@@ -89,6 +114,7 @@ export async function listExecutions(documentId?: string, limit = 50) {
       try {
         const value = JSON.parse(await readFile(join(executionsPath, file), 'utf8'));
         if (documentId && value.document_id !== documentId) continue;
+        if (planId && value.plan_id !== planId) continue;
         entries.push(value);
       } catch { /* ignore unreadable log entries */ }
     }

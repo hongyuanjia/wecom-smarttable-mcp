@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { schemaFromRaw } from '../dist/protocol.js';
 import { normalizeFields } from '../dist/fields.js';
-import { normalizeView, planViewWrite, encodeViewFilter, encodeViewGroup, encodeViewSort, buildViewObject } from '../dist/views.js';
+import { normalizeView, planViewWrite, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, buildViewObject } from '../dist/views.js';
 
 const rawFields = {
   k9: 'f_text',
@@ -53,6 +53,38 @@ test('视图规范化：列顺序、隐藏列、列宽、分组、排序、筛�
   assert.equal(view.dynamic_viewer.supported, true);
   assert.equal(view.raw_digest.length, 64);
   assert.equal(view.config_digest.length, 64);
+});
+
+test('直接创建同名视图复用配置比较：相同跳过、不同给差异、多个要求 ID', () => {
+  const patch = { name: '我的职责', type: 'grid',
+    field_order: ['f_text', 'f_user', 'f_status'],
+    widths: { f_text: 280, f_user: 160, f_status: 140 },
+    group: [{ field_id: 'f_status' }], sort: [{ field_id: 'f_text' }], statistics: false };
+  const existingRaw = () => ({
+    k30: 'v_same', k31: '我的职责', k32: 1, k33: 2, k34: 'owner_example', k35: 1,
+    k1: {
+      k1: [], k2: ['f_text', 'f_user', 'f_status'], k3: 1, k4: 1,
+      k5: { f_text: { k1: 280, k2: false }, f_user: { k1: 160, k2: false }, f_status: { k1: 140, k2: false } },
+      k6: true, k7: [{ k1: 'f_status', k2: false }], k8: null,
+      k9: [{ k1: 'f_text', k2: false }], k10: false, k13: '',
+    },
+  });
+  const existing = normalizeView(existingRaw(), fields);
+
+  const same = compareCreateView({ patch, views: [existing], fields });
+  assert.equal(same.decision, 'skip');
+  assert.equal(same.view_id, 'v_same');
+  assert.deepEqual(same.differences, []);
+  assert.equal(planViewWrite({ action: 'create', patch, views: [existing], fields }).decision, 'skip');
+
+  const different = compareCreateView({ patch: { ...patch, sort: [{ field_id: 'f_user' }] }, views: [existing], fields });
+  assert.equal(different.decision, 'conflict');
+  assert.ok(different.differences.some(item => item.path === 'sort'));
+
+  const other = normalizeView({ ...existingRaw(), k30: 'v_other' }, fields);
+  assert.throws(() => compareCreateView({ patch, views: [existing, other], fields }),
+    error => error.code === 'VIEW_AMBIGUOUS');
+  assert.equal(compareCreateView({ patch: { ...patch, name: '新视图' }, views: [existing], fields }), null);
 });
 
 test('同名校验：唯一且无差异跳过，同名不同配置给差异，多个同名必须用 ID', () => {
