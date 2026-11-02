@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { schemaFromRaw } from '../dist/protocol.js';
 import { acknowledgedClears, addColumnMutations, appendRank, columnOrders, columnViewsMatch,
-  deleteColumnMutations, encodeCell, updateMutations, valuesMatch } from '../dist/mutations.js';
+  deleteColumnMutations, encodeCell, memberUpdateMutations, updateMutations, valuesMatch } from '../dist/mutations.js';
 import { parseDocumentRole, parseRecyclePage } from '../dist/document-protocol.js';
 import { documentReference } from '../dist/local.js';
 
@@ -107,4 +107,60 @@ test('真实回收站 ID 后缀、删除状态和分页结束均被核对', () =
   const changed = structuredClone(deletion.recycle);
   changed.list[0].status = 1;
   assert.throws(() => parseRecyclePage(changed, 'id_example_file'), e => e.code === 'PARSE_ERROR');
+});
+
+
+test('成员单元格使用 7:[{1:uid}],31:actorUid 编码，并在一个请求中批量提交', () => {
+  const actor = { '1': 'actor_uid', '2': '操作者', '3': 'avatar', '5': 1970000000000000, '6': '示例企业', '7': '操作者', '8': 1970000000000000 };
+  const [first, second] = memberUpdateMutations('sheet_example', [
+    { record_id: 'record_a', field_id: 'field_user', uids: ['target_a', 'target_b', 'target_a'] },
+    { record_id: 'record_b', field_id: 'field_user', uids: [] },
+  ], actor, false);
+  assert.deepEqual(first.c['4'].field_user, { '7': [{ '1': 'target_a' }, { '1': 'target_b' }], '30': 7, '31': 'actor_uid' });
+  assert.deepEqual(second.c['4'].field_user, { '7': [], '30': 7, '31': 'actor_uid' });
+  assert.equal(first.c['5'], actor);
+  assert.equal(first.c['6'], false);
+  assert.equal(first.c['7'], false);
+  assert.equal(first.t, 3013);
+  assert.equal(first.r, -1);
+  assert.throws(() => memberUpdateMutations('sheet_example', [
+    { record_id: 'record_a', field_id: 'field_user', uids: ['target_a'] },
+    { record_id: 'record_a', field_id: 'field_user', uids: ['target_b'] },
+  ], actor, false), error => error.code === 'INVALID_ARGUMENT');
+  assert.throws(() => memberUpdateMutations('sheet_example', [
+    { record_id: 'record_a', field_id: 'field_user', uids: [''] },
+  ], actor, false), error => error.code === 'INVALID_ARGUMENT');
+});
+
+test('复杂字段删除：查找引用、单向关联和公式字段生成 3015 并按视图调整索引', () => {
+  const raw = {
+    k9: 'f_title',
+    k4: [{ k30: 'v1', k31: '全部记录', k32: 1, k1: { k2: ['f_title', 'f_lookup', 'f_link', 'f_formula'] } }],
+    k3: {
+      f_title: { k30: '标题', k31: 1 },
+      f_lookup: { k30: '引用', k31: 20, k20: {} },
+      f_link: { k30: '关联', k31: 18, k18: {} },
+      f_formula: { k30: '公式', k31: 19, k19: {} },
+    },
+  };
+  const complex = schemaFromRaw(raw);
+  const mutations = deleteColumnMutations('sheet', complex, ['f_lookup', 'f_link', 'f_formula']);
+  assert.deepEqual(mutations.map(m => m.t), [3015, 3015, 3015]);
+  assert.equal(mutations[0].c['4']['1']['v1'], 1);
+  assert.equal(mutations[1].c['4']['1']['v1'], 1);
+  assert.equal(mutations[2].c['4']['1']['v1'], 1);
+  assert.equal(mutations[0].c['8'], false);
+});
+
+test('URL 单元格编码为 8:[{1:url,2:url}]，并按 URL 回读比较', () => {
+  const raw = {
+    k9: 'f_title',
+    k4: [{ k30: 'v1', k31: '全部记录', k32: 1, k1: { k2: ['f_title', 'f_url'] } }],
+    k3: { f_title: { k30: '标题', k31: 1 }, f_url: { k30: '链接', k31: 8 } },
+  };
+  const schema = schemaFromRaw(raw);
+  const url = schema.fields.find(f => f.id === 'f_url');
+  assert.deepEqual(encodeCell(url, 'https://example.com/a'), { '30': 8, '8': [{ '1': 'https://example.com/a', '2': 'https://example.com/a' }] });
+  assert.equal(valuesMatch(schema, { raw: { k1: { f_url: { k30: 8, k8: [{ k1: 'https://example.com/a', k2: 'https://example.com/a' }] } } } },
+    { f_url: 'https://example.com/a' }), true);
 });
