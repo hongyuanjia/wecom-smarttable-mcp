@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { schemaFromRaw } from '../dist/protocol.js';
 import { normalizeFields } from '../dist/fields.js';
 import { normalizeView, planViewWrite, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, buildViewObject, viewStatisticsMatches } from '../dist/views.js';
+import { compareHiddenFieldSets, compareProtectedWidths, compareRequestedWidths, mergeWidths } from '../dist/view-semantics.js';
 import { mutation } from '../dist/mutations.js';
 
 const rawFields = {
@@ -335,4 +336,118 @@ test('视图可编辑性：锁定不可改，个人仅 owner 可改，共享按�
   assert.equal(normalizeView({ ...rawView(), k35: 3 }, fields, undefined, 'owner_example').editable, true);
   assert.equal(normalizeView({ ...rawView(), k35: 3 }, fields, undefined, 'other_user').editable, false);
   assert.equal(normalizeView({ ...rawView(), k35: 1 }, fields, undefined, 'other_user').editable, true);
+});
+
+test('隐藏列按集合比较：乱序跳过，缺少/多出报告具体路径，省略保留，显式空数组清空', () => {
+  const allColumns = ['f_text', 'f_user', 'f_status', 'f_task'];
+  const existing = normalizeView(rawView({
+    k1: ['f_text', 'f_task'],
+    k2: allColumns,
+    k5: {
+      f_text: { k1: 280, k2: true }, f_user: { k1: 160, k2: false },
+      f_status: { k1: 140, k2: false }, f_task: { k1: 120, k2: true },
+    },
+  }), fields);
+  assert.deepEqual(existing.hidden_fields, ['f_text', 'f_task']);
+
+  const reordered = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { hidden_fields: ['f_task', 'f_text'] }, views: [existing], fields });
+  assert.equal(reordered.decision, 'skip');
+  assert.deepEqual(reordered.differences, []);
+
+  const missing = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { hidden_fields: ['f_text'] }, views: [existing], fields });
+  assert.equal(missing.decision, 'update');
+  assert.deepEqual(missing.differences, [{ path: 'hidden_fields.extra.f_task', before: true, after: false }]);
+
+  const extra = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { hidden_fields: ['f_text', 'f_task', 'f_user'] }, views: [existing], fields });
+  assert.equal(extra.decision, 'update');
+  assert.deepEqual(extra.differences, [{ path: 'hidden_fields.missing.f_user', before: false, after: true }]);
+
+  const omitted = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { name: '我的职责' }, views: [existing], fields });
+  assert.equal(omitted.decision, 'skip');
+  assert.deepEqual(omitted.effective.hidden_fields, ['f_text', 'f_task']);
+
+  const cleared = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { hidden_fields: [] }, views: [existing], fields });
+  assert.equal(cleared.decision, 'update');
+  assert.deepEqual(cleared.differences, [
+    { path: 'hidden_fields.extra.f_task', before: true, after: false },
+    { path: 'hidden_fields.extra.f_text', before: true, after: false },
+  ]);
+
+  assert.throws(() => planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { hidden_fields: ['f_text', 'f_text'] }, views: [existing], fields }),
+  error => error.code === 'INVALID_ARGUMENT');
+  assert.throws(() => planViewWrite({ action: 'create', patch: { name: '我的职责', hidden_fields: ['f_text', 'f_text'] },
+    views: [existing], fields }), error => error.code === 'INVALID_ARGUMENT');
+  assert.throws(() => planViewWrite({ action: 'create', patch: { name: '我的职责', widths: { f_text: 0 } },
+    views: [existing], fields }), error => error.code === 'INVALID_ARGUMENT');
+});
+
+test('列宽按补丁合并：只核验请求键，未请求键保留，空对象和重复补丁无差异', () => {
+  const existing = normalizeView(rawView({ k5: {
+    f_text: { k1: 120, k2: false }, f_user: { k1: 140, k2: false },
+    f_status: { k1: 0, k2: true },
+  } }), fields);
+
+  const plan = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { widths: { f_text: 300 } }, views: [existing], fields });
+  assert.equal(plan.decision, 'update');
+  assert.deepEqual(plan.effective.widths, { f_text: 300, f_user: 140, f_status: 0 });
+  assert.deepEqual(plan.differences, [{ path: 'widths.f_text', before: 120, after: 300 }]);
+
+  const repeated = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { widths: { f_text: 120 } }, views: [existing], fields });
+  assert.equal(repeated.decision, 'skip');
+  assert.deepEqual(repeated.differences, []);
+  assert.deepEqual(repeated.effective.widths, { f_text: 120, f_user: 140, f_status: 0 });
+
+  const empty = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { widths: {} }, views: [existing], fields });
+  assert.equal(empty.decision, 'skip');
+  assert.deepEqual(empty.differences, []);
+
+  for (const width of [0, -1, 1001, 140.5]) {
+    assert.throws(() => planViewWrite({ action: 'update', view_id: 'v_mine',
+      patch: { widths: { f_text: width } }, views: [existing], fields }),
+    error => error.code === 'INVALID_ARGUMENT', String(width));
+  }
+  assert.throws(() => planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { widths: { f_missing: 140 } }, views: [existing], fields }),
+  error => error.code === 'UNKNOWN_FIELD');
+});
+
+test('分组和排序仍按顺序比较，不套用隐藏列集合语义', () => {
+  const existing = normalizeView(rawView({ k7: [{ k1: 'f_status', k2: false }, { k1: 'f_user', k2: true }],
+    k9: [{ k1: 'f_text', k2: false }] }), fields);
+  const reordered = planViewWrite({ action: 'update', view_id: 'v_mine', patch: {
+    group: [{ field_id: 'f_user', descending: true }, { field_id: 'f_status', descending: false }],
+  }, views: [existing], fields });
+  assert.equal(reordered.decision, 'update');
+  assert.ok(reordered.differences.some(item => item.path === 'group'));
+
+  const same = planViewWrite({ action: 'update', view_id: 'v_mine', patch: {
+    group: [{ field_id: 'f_status' }, { field_id: 'f_user', descending: true }],
+    sort: [{ field_id: 'f_text' }],
+  }, views: [existing], fields });
+  assert.equal(same.decision, 'skip');
+});
+
+test('共享语义层：宽度合并、请求键与受保护键分别比较，隐藏集合给出具体路径', () => {
+  assert.deepEqual(mergeWidths({ A: 120, B: 140, H: 0 }, { A: 300 }), { A: 300, B: 140, H: 0 });
+  assert.deepEqual(compareRequestedWidths({ A: 299, B: 140 }, { A: 300 }), [
+    { path: 'widths.A', before: 299, after: 300 },
+  ]);
+  assert.deepEqual(compareRequestedWidths({ A: 300, B: 140 }, { A: 300 }), []);
+  assert.deepEqual(compareProtectedWidths({ A: 120, B: 140, H: 0 }, { A: 300, B: 140, H: 0 }, ['A']), []);
+  assert.deepEqual(compareProtectedWidths({ A: 120, B: 140, H: 0 }, { A: 300, B: 999, H: 0 }, ['A']), [
+    { path: 'widths.B', before: 140, after: 999 },
+  ]);
+  assert.deepEqual(compareHiddenFieldSets(['f_user', 'f_text'], ['f_text', 'f_user']), []);
+  assert.deepEqual(compareHiddenFieldSets(['f_text'], ['f_text', 'f_user']), [
+    { path: 'hidden_fields.missing.f_user', before: false, after: true },
+  ]);
 });
