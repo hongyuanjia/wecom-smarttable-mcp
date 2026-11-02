@@ -18,6 +18,34 @@ test('默认资料目录在仓库外，显式配置仍然生效', async t => {
   assert.equal(configured.trim(), 'true');
 });
 
+test('执行日志写入 plan_id、按计划筛选，并按文档保留最近 N 条且仍为 0600', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'wecom-exec-retention-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const code = `import {saveExecution,listExecutions,executionsPath} from './dist/local.js';import {readdir,stat} from 'node:fs/promises';import {join} from 'node:path';
+    const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+    const planA='a'.repeat(64);
+    for(let i=0;i<5;i+=1){await saveExecution({status:'verified',document_id:'id_doc_a',plan_id:planA,operation:'op_'+i,revision:i});await sleep(5);}
+    const planB='b'.repeat(64);
+    await saveExecution({status:'verified',document_id:'id_doc_b',plan_id:planB,operation:'other',revision:1});
+    const filtered=await listExecutions('id_doc_a',50,planA);
+    const mismatched=await listExecutions('id_doc_a',50,planB);
+    const kept=await listExecutions('id_doc_a');
+    const files=(await readdir(executionsPath)).sort();
+    const mode=(await stat(join(executionsPath,files[0]))).mode&0o777;
+    console.log(JSON.stringify({filtered:filtered.length,mismatched:mismatched.length,kept:kept.length,
+      operations:kept.map(entry=>entry.operation),planIds:[...new Set(kept.map(entry=>entry.plan_id))],
+      mode:mode.toString(8),total:(await listExecutions()).length}));`;
+  const result = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', code],
+    { env: { ...process.env, WECOM_MCP_DATA_DIR: dir, WECOM_MCP_EXECUTION_RETENTION: '3' }, encoding: 'utf8' }));
+  assert.equal(result.filtered, 3);
+  assert.equal(result.mismatched, 0);
+  assert.equal(result.kept, 3);
+  assert.deepEqual(result.operations, ['op_4', 'op_3', 'op_2']);
+  assert.deepEqual(result.planIds, ['a'.repeat(64)]);
+  assert.equal(result.mode, '600');
+  assert.equal(result.total, 4);
+});
+
 test('执行日志按文档过滤，保存操作 ID、版本与状态且权限为 600', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wecom-exec-'));
   t.after(() => rm(dir, { recursive: true, force: true }));

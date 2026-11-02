@@ -395,7 +395,8 @@ function formulaAction(context: PlanContext, change: Extract<PlanChange, { kind:
   if (unsupported.length) {
     throw new WecomError('UNSUPPORTED_FORMULA', '这些函数尚未验证网页公式编码，未生成可执行计划。', { functions: unsupported });
   }
-  const validation = validateFormulaDefinition(change.formula, sheet.fields);
+  const validation = validateFormulaDefinition(change.formula, sheet.fields,
+    { field_id: change.action === 'update' ? change.field_id : undefined });
   if (validation.status === 'invalid') {
     throw new WecomError('FORMULA_INVALID', '公式表达式未通过本地校验；未生成可执行计划。', {
       errors: validation.errors, inferred_type: validation.inferred_type });

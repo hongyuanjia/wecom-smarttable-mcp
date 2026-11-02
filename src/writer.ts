@@ -10,10 +10,10 @@ import { parseDocumentRole, parseRecyclePage } from './document-protocol.js';
 import { acknowledgedClears, addColumnMutations, appendRank, columnViewsMatch, deleteColumnMutations, memberUpdateMutations, mutation, newId, uniqueIds, updateMutations, valuesMatch,
   type CellValue, type ColumnInput, type MemberChange, type Mutation, type RecordInput } from './mutations.js';
 import { cellsFor, parseDerivedResult } from './protocol.js';
-import { buildViewObject, encodeViewFilter, encodeViewGroup, encodeViewSort, normalizeView, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
+import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, normalizeView, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
 import { normalizeFields } from './fields.js';
 import { formulaFieldMutations, formulaFormatter, formulaFormatterMatches, lookupFieldMutations, relationFieldMutations, type FormulaFormatSpec, type LookupSpec, type RelationSpec } from './field-writer.js';
-import { encodeProviderFormula, type FormulaExpression } from './formulas.js';
+import { assertFormulaDefinition, encodeProviderFormula, unsupportedProviderCalls, type FormulaExpression } from './formulas.js';
 
 type Raw = Record<string, any>;
 
@@ -57,7 +57,7 @@ function resolveFormulaFormat(format?: FormulaFormatSpec | string): Raw | undefi
 }
 interface Target {
   doc: ReturnType<typeof documentUrl>; sheetId: string; chunk: Chunk; schema: Schema; user: Raw; actor: Raw; uid: string;
-  dver: string; pver: number; recordMode: boolean;
+  dver: string; pver: number; recordMode: boolean; planId?: string;
 }
 const DOC = 'https://doc.weixin.qq.com';
 
@@ -291,7 +291,7 @@ export class WecomWriter {
     }
   }
 
-  private async prepare(input: string, sheetId: string, revision: number): Promise<Target> {
+  private async prepare(input: string, sheetId: string, revision: number, planId?: string): Promise<Target> {
     this.cancelled();
     const { doc, open, directory } = await this.client.openDocument(input);
     const vars = open.clientVars;
@@ -309,7 +309,7 @@ export class WecomWriter {
     const actor = { '1': vars.uin, '2': vars.userInfo.fullName, '3': vars.userInfo.userPic || '',
       '5': corpId, '6': vars.userInfo.corp_name || '', '7': vars.userInfo.fullName, '8': corpId };
     return { doc, sheetId, chunk, schema, uid: vars.uin, user: { '1': vars.uin, '2': vars.userInfo.fullName }, actor,
-      dver: collab.dver, pver: collab.pver, recordMode: vars.optimizedVer >= 4 };
+      dver: collab.dver, pver: collab.pver, recordMode: vars.optimizedVer >= 4, planId };
   }
 
   private async records(target: Target, first: Chunk, wanted?: Set<string>) {
@@ -351,7 +351,8 @@ export class WecomWriter {
 
   private async apply(target: Target, mutations: Mutation[], operation: string, affected: Raw,
     verify: (chunk: Chunk, schema: Schema, clears: ReadonlyMap<string, Set<string>>) => Promise<boolean>) {
-    const intent = { document_id: target.doc.id, sheet_id: target.sheetId, operation, ...affected };
+    const intent = { document_id: target.doc.id, sheet_id: target.sheetId, operation, ...affected,
+      ...(target.planId ? { plan_id: target.planId } : {}) };
     const current = await this.client.chunk(target.doc.id, target.sheetId, 0, 1);
     if (current.revision !== target.chunk.revision) throw new WecomError('STALE_REVISION', '准备修改期间表格已变化，尚未提交；请重新读取后决定修改。', { expected_revision: target.chunk.revision, current_revision: current.revision });
     const taskId = randomInt(1, 2 ** 48 - 1);
@@ -383,6 +384,7 @@ export class WecomWriter {
       const schema = await this.client.schema(target.doc.id, after);
       if (!await verify(after, schema, acknowledgedClears(mutations, accepted.changeset))) throw new WecomError('WRITE_MISMATCH', '重新读取的结果与请求不一致。');
       const executionId = await this.recordExecution({ status: 'verified', document_id: target.doc.id,
+        ...(target.planId ? { plan_id: target.planId } : {}),
         sheet_id: target.sheetId, operation, ...affected, previous_revision: revision,
         committed_revision: committedRevision, revision: after.revision });
       return { ...intent, execution_id: executionId, status: 'verified', previous_revision: revision,
@@ -391,6 +393,7 @@ export class WecomWriter {
       const reasonCode = error instanceof WecomError ? error.code : 'LOCAL_ERROR';
       const reasonMessage = error instanceof WecomError ? error.message : '本地错误';
       const executionId = await this.recordExecution({ status: 'not_verified', document_id: target.doc.id,
+        ...(target.planId ? { plan_id: target.planId } : {}),
         sheet_id: target.sheetId, operation, ...affected, committed_revision: committedRevision,
         reason_code: reasonCode, reason_message: reasonMessage });
       throw new WecomError('WRITE_NOT_VERIFIED', '服务端已返回写入响应，但回读未能完整核对；请先检查目标，不能直接重复提交。', {
@@ -404,8 +407,8 @@ export class WecomWriter {
     try { return (await saveExecution(entry)).execution_id; } catch { return null; }
   }
 
-  async updateRecords(url: string, sheetId: string, revision: number, rows: RecordInput[]) {
-    const target = await this.prepare(url, sheetId, revision);
+  async updateRecords(url: string, sheetId: string, revision: number, rows: RecordInput[], planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const commands = updateMutations(sheetId, target.schema, rows, target.user, target.recordMode);
     const ids = rows.map(r => r.record_id);
     await this.requireRecords(target, ids);
@@ -415,8 +418,8 @@ export class WecomWriter {
     });
   }
 
-  async addRecords(url: string, sheetId: string, revision: number, values: Record<string, CellValue>[]) {
-    const target = await this.prepare(url, sheetId, revision);
+  async addRecords(url: string, sheetId: string, revision: number, values: Record<string, CellValue>[], planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const existing = await this.records(target, target.chunk);
     const rows = values.map(value => ({ record_id: newId('r'), values: value }));
     uniqueIds(rows.map(r => r.record_id), '新记录列表');
@@ -435,8 +438,8 @@ export class WecomWriter {
     });
   }
 
-  async deleteRecords(url: string, sheetId: string, revision: number, ids: string[]) {
-    const target = await this.prepare(url, sheetId, revision);
+  async deleteRecords(url: string, sheetId: string, revision: number, ids: string[], planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     await this.requireRecords(target, ids);
     const command = mutation(3035, { '1': sheetId, '2': ids.map(id => ({ '1': id })) });
     return this.apply(target, [command], 'delete_records', { record_ids: ids }, async after => {
@@ -447,8 +450,8 @@ export class WecomWriter {
   }
 
 
-  async updateMemberCells(url: string, sheetId: string, revision: number, changes: MemberChange[]) {
-    const target = await this.prepare(url, sheetId, revision);
+  async updateMemberCells(url: string, sheetId: string, revision: number, changes: MemberChange[], planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const ids = [...new Set(changes.map(change => change.record_id))];
     await this.requireRecords(target, ids);
     const commands = memberUpdateMutations(sheetId, changes, target.actor, target.recordMode);
@@ -470,15 +473,29 @@ export class WecomWriter {
   }
 
 
-  async createView(url: string, sheetId: string, revision: number, patch: ViewWriteInput) {
+  async createView(url: string, sheetId: string, revision: number, patch: ViewWriteInput, planId?: string) {
     if (!patch.name) throw new WecomError('INVALID_ARGUMENT', '新建视图需要名称。');
-    const target = await this.prepare(url, sheetId, revision);
-    if (target.schema.views.some(view => view.name === patch.name)) {
-      throw new WecomError('VIEW_NAME_EXISTS', '同名视图已存在；请用 view_id 更新，或换一个名称。', { name: patch.name });
+    const target = await this.prepare(url, sheetId, revision, planId);
+    const normalizedFields = normalizeFields(target.schema, [target.sheetId]);
+    const normalizedViews = target.schema.views.map(view => normalizeView(view, normalizedFields));
+    const comparison = compareCreateView({ patch, views: normalizedViews, fields: normalizedFields });
+    if (comparison?.decision === 'skip') {
+      return { status: 'noop', operation: 'create_view', document_id: target.doc.id, sheet_id: target.sheetId,
+        name: patch.name, view_id: comparison.view_id, no_changes: true, previous_revision: target.chunk.revision,
+        revision: target.chunk.revision,
+        note: '同名视图的规范化配置与本次创建请求一致；返回已有视图，未提交写入。' };
+    }
+    if (comparison) {
+      throw new WecomError('VIEW_CONFIG_DIFF',
+        '同名视图已存在但规范化配置不同；请改用 view_id 更新，未提交写入。', {
+          name: patch.name, view_id: comparison.view_id,
+          differences: comparison.differences.slice(0, 20),
+          difference_count: comparison.differences.length,
+          required_action: { tool: 'wecom_update_view', view_id: comparison.view_id },
+        });
     }
     const rows = await this.records(target, target.chunk);
     const recordIds = [...rows.keys()];
-    const normalizedFields = normalizeFields(target.schema, [target.sheetId]);
     const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
     const viewId = `v${Array.from({ length: 5 }, () => alphabet[randomInt(alphabet.length)]).join('')}`;
     if (target.schema.views.some(view => view.id === viewId)) throw new WecomError('ID_COLLISION', '随机视图 ID 与已有视图重复，尚未提交。');
@@ -491,8 +508,8 @@ export class WecomWriter {
     });
   }
 
-  async updateView(url: string, sheetId: string, revision: number, viewId: string, patch: ViewWriteInput) {
-    const target = await this.prepare(url, sheetId, revision);
+  async updateView(url: string, sheetId: string, revision: number, viewId: string, patch: ViewWriteInput, planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const raw = target.schema.raw.k4.find((candidate: Raw) => candidate.k30 === viewId);
     if (!raw) throw new WecomError('UNKNOWN_VIEW', 'view_id 不存在或不可读取。', { view_id: viewId });
     // 用规范化配置摘要而不是原始视图对象：原始宽度映射会随分块读取范围变化。
@@ -660,8 +677,8 @@ export class WecomWriter {
       revision: committedRevision, no_changes: false, view_id: viewId };
   }
 
-  async deleteView(url: string, sheetId: string, revision: number, viewId: string) {
-    const target = await this.prepare(url, sheetId, revision);
+  async deleteView(url: string, sheetId: string, revision: number, viewId: string, planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const index = target.schema.raw.k4.findIndex((candidate: Raw) => candidate.k30 === viewId);
     if (index < 0) throw new WecomError('UNKNOWN_VIEW', 'view_id 不存在或不可读取。', { view_id: viewId });
     return this.apply(target, [mutation(3007, { '1': sheetId, '2': viewId, '3': { '1': index } })],
@@ -731,8 +748,8 @@ export class WecomWriter {
   }
 
   async updateFields(url: string, sheetId: string, revision: number, fieldId: string,
-    patch: { name?: string; user_multiple?: boolean; user_notify?: boolean }) {
-    const target = await this.prepare(url, sheetId, revision);
+    patch: { name?: string; user_multiple?: boolean; user_notify?: boolean }, planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const raw = target.schema.raw.k3[fieldId];
     if (!raw) throw new WecomError('UNKNOWN_FIELD', '字段 ID 不存在或不可读取。', { field_id: fieldId });
     const changesUser = patch.user_multiple !== undefined || patch.user_notify !== undefined;
@@ -776,8 +793,8 @@ export class WecomWriter {
     spec: { target_sheet_id?: string; target_field_id: string; relation_field_id?: string;
       aggregation: LookupSpec['aggregation']; fail_on_ambiguous?: boolean;
       conditions: { target_field_id: string; local_field_id?: string; value?: string | number | boolean | string[];
-        operator?: 'eq' | 'contains' }[] }) {
-    const target = await this.prepare(url, sheetId, revision);
+        operator?: 'eq' | 'contains' }[] }, planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const relationField = spec.relation_field_id
       ? target.schema.fields.find(field => field.id === spec.relation_field_id) : undefined;
     if (spec.relation_field_id && !relationField) {
@@ -936,8 +953,8 @@ export class WecomWriter {
       empty_source_keys: empty, ambiguous: duplicateKeys.length > 0 };
   }
 
-  async createRelationField(url: string, sheetId: string, revision: number, name: string, spec: RelationSpec) {
-    const target = await this.prepare(url, sheetId, revision);
+  async createRelationField(url: string, sheetId: string, revision: number, name: string, spec: RelationSpec, planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     await this.client.chunk(target.doc.id, spec.target_sheet_id, 0, 1);
     const { field, mutations } = relationFieldMutations(target.doc.id, sheetId, target.schema, name, spec);
     const twoWay = spec.two_way === true;
@@ -961,8 +978,8 @@ export class WecomWriter {
   }
 
   async uploadAsset(url: string, sheetId: string, revision: number, fieldId: string, recordId: string,
-    filePath: string, viewId?: string) {
-    const target = await this.prepare(url, sheetId, revision);
+    filePath: string, viewId?: string, planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const field = target.schema.fields.find(candidate => candidate.id === fieldId);
     if (!field) throw new WecomError('UNKNOWN_FIELD', '字段 ID 不存在或不可读取。', { field_id: fieldId });
     if (![5, 6].includes(field.type_code)) throw new WecomError('INVALID_ARGUMENT', '只有图片或附件字段可以上传文件。', { field_id: fieldId });
@@ -1050,8 +1067,8 @@ export class WecomWriter {
   }
 
   async updateRelationCells(url: string, sheetId: string, revision: number, fieldId: string,
-    updates: { record_id: string; target_record_ids: string[] }[]) {
-    const target = await this.prepare(url, sheetId, revision);
+    updates: { record_id: string; target_record_ids: string[] }[], planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const raw = target.schema.raw.k3[fieldId];
     if (!raw || (raw.k31 !== 18 && raw.k31 !== 21)) {
       throw new WecomError('INVALID_ARGUMENT', '只有关联字段可以写入关联单元格。', { field_id: fieldId });
@@ -1143,9 +1160,14 @@ export class WecomWriter {
   }
 
   async createFormulaField(url: string, sheetId: string, revision: number, name: string,
-    formula: { expression: FormulaExpression; result_type: string; format?: FormulaFormatSpec | string; dependencies?: string[] }) {
-    const target = await this.prepare(url, sheetId, revision);
+    formula: { expression: FormulaExpression; result_type: string; format?: FormulaFormatSpec | string; dependencies?: string[] }, planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const normalized = normalizeFields(target.schema, [sheetId]);
+    const unsupported = unsupportedProviderCalls(formula.expression);
+    if (unsupported.length) {
+      throw new WecomError('UNSUPPORTED_FORMULA', '这些函数尚未验证网页公式编码；未提交写入。', { functions: unsupported });
+    }
+    assertFormulaDefinition(formula, normalized);
     const tokens = encodeProviderFormula(formula.expression, normalized);
     const formatter = resolveFormulaFormat(formula.format);
     const { field, mutations } = formulaFieldMutations(sheetId, target.schema, name, tokens, formatter);
@@ -1164,8 +1186,8 @@ export class WecomWriter {
   }
 
   async updateFormulaField(url: string, sheetId: string, revision: number, fieldId: string,
-    patch: { name?: string; formula?: { expression: FormulaExpression; result_type: string; format?: FormulaFormatSpec | string; dependencies?: string[] } }) {
-    const target = await this.prepare(url, sheetId, revision);
+    patch: { name?: string; formula?: { expression: FormulaExpression; result_type: string; format?: FormulaFormatSpec | string; dependencies?: string[] } }, planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const raw = target.schema.raw.k3[fieldId];
     if (!raw || raw.k31 !== 19) throw new WecomError('INVALID_ARGUMENT', '字段不是公式字段。', { field_id: fieldId });
     const config: Raw = {};
@@ -1174,6 +1196,11 @@ export class WecomWriter {
     let formatter: Raw | undefined;
     if (patch.formula) {
       const normalized = normalizeFields(target.schema, [sheetId]);
+      const unsupported = unsupportedProviderCalls(patch.formula.expression);
+      if (unsupported.length) {
+        throw new WecomError('UNSUPPORTED_FORMULA', '这些函数尚未验证网页公式编码；未提交写入。', { functions: unsupported });
+      }
+      assertFormulaDefinition(patch.formula, normalized, { field_id: fieldId });
       tokens = encodeProviderFormula(patch.formula.expression, normalized);
       formatter = resolveFormulaFormat(patch.formula.format) ?? raw.k19?.k2;
       config['19'] = { '1': tokens, ...(formatter ? { '2': formatter } : {}) };
@@ -1234,8 +1261,8 @@ export class WecomWriter {
     };
   }
 
-  async addFields(url: string, sheetId: string, revision: number, columns: ColumnInput[]) {
-    const target = await this.prepare(url, sheetId, revision);
+  async addFields(url: string, sheetId: string, revision: number, columns: ColumnInput[], planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const { fields, mutations } = addColumnMutations(sheetId, target.schema, columns);
     return this.apply(target, mutations, 'add_fields', { fields }, async (_after, schema) => columnViewsMatch(target.schema, schema, fields.map(f => f.id), []) && fields.every(field => {
       const actual = schema.fields.find(f => f.id === field.id);
@@ -1244,8 +1271,8 @@ export class WecomWriter {
     }));
   }
 
-  async deleteFields(url: string, sheetId: string, revision: number, ids: string[]) {
-    const target = await this.prepare(url, sheetId, revision);
+  async deleteFields(url: string, sheetId: string, revision: number, ids: string[], planId?: string) {
+    const target = await this.prepare(url, sheetId, revision, planId);
     const commands = deleteColumnMutations(sheetId, target.schema, ids);
     return this.apply(target, commands, 'delete_fields', { field_ids: ids }, async (_after, schema) => columnViewsMatch(target.schema, schema, [], ids) && ids.every(id => !schema.fields.some(f => f.id === id)));
   }

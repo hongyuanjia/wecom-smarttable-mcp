@@ -103,12 +103,12 @@ tool_timeout_sec = 1200
 | `wecom_read_view` | 读取单个视图的筛选、排序、分组、列顺序、可见列、隐藏列、列宽、冻结列、作用域/可编辑性、配置摘要与未知设置 |
 | `wecom_read_view_records` | 按视图共享筛选在本机过滤记录，支持动态“我”、分页和字段选择 |
 | `wecom_update_member_cells` | 通过 HTTP `commitchanges` 写入成员，支持单/多选、替换/追加/移除/明确清空，并按 uid 集合 HTTP 回读核对 |
-| `wecom_create_view` / `wecom_update_view` / `wecom_delete_view` | 通过 HTTP 创建共享/锁定/个人视图，或更新名称、作用域、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列、看板卡片；支持 `config_digest` 并发校验和删除视图 |
+| `wecom_create_view` / `wecom_update_view` / `wecom_delete_view` | 通过 HTTP 创建共享/锁定/个人视图，或更新名称、作用域、筛选、分组、排序、隐藏列、列宽、列顺序、冻结列、看板卡片；创建同名视图时按规范化配置比较：相同返回已有视图且 `no_changes=true`，不同返回 `VIEW_CONFIG_DIFF` 并要求用 `view_id` 更新，多个同名返回 `VIEW_AMBIGUOUS`。支持 `config_digest` 并发校验和删除视图 |
 | `wecom_update_fields` | 通过 HTTP `3017` 重命名字段、修改人员多选/添加通知，并回读核对 |
 | `wecom_create_lookup_field` | 通过 HTTP 创建查找引用字段，支持条件匹配/固定值/沿关联字段、8 种统计方式和零匹配/多匹配诊断 |
 | `wecom_create_relation_field` / `wecom_update_relation_cells` | 通过 HTTP 创建单向关联字段，并按目标记录 ID 写入关联单元格、集合回读 |
-| `wecom_create_formula_field` / `wecom_update_formula_field` | 把受限 AST 编码为网页公式 token；读取 k36 结果与错误/空/待计算状态，不使用 `eval` |
-| `wecom_list_executions` | 读取本机执行日志：execution_id、时间、文档/子表、操作、版本和 verified/not_verified |
+| `wecom_create_formula_field` / `wecom_update_formula_field` | 把受限 AST 编码为网页公式 token；写入前执行与计划工具相同的函数、参数数量、类型、依赖冲突和循环校验；读取 k36 结果与错误/空/待计算状态，不使用 `eval` |
+| `wecom_list_executions` | 读取本机执行日志：execution_id、时间、文档/子表、操作、版本、可选 plan_id 和 verified/not_verified；可按 document_id 与 plan_id 过滤，每个文档默认保留最近 1000 条 |
 | `wecom_plan_changes` | 只读生成配置差异、依赖顺序、影响对象和 blocked 原因，并保存本机计划记录 |
 | `wecom_verify_changes` | 重新读取线上结构与人员单元格，与保存计划或内联 changes 比较，逐项返回 verified/pending/conflict/unknown |
 
@@ -211,7 +211,7 @@ tool_timeout_sec = 1200
 
 `wecom_create_relation_field` 创建单向关联（类型 18）或双向关联（类型 21）。双向关联只提交正向字段，`backFieldId` 预生成，服务端在同一提交内自动创建反向字段；跨表提交会返回两条 `respective`，工具按最大 `newRev` 回读。`wecom_update_relation_cells` 按目标记录 ID 写入关联单元格：单向编码 `18:[目标记录ID]`；双向编码 `21:{1:[新增],2:[删除]}`，且 `3013` 的 `c.6=true` 才会触发服务端反向同步，工具会同时回读两侧。目标记录不存在时拒绝，不留下悬空引用。
 
-`wecom_create_formula_field` / `wecom_update_formula_field` 把受限 AST 编码为网页公式 token：文本片段 `{1:1, 2:text}` 与字段引用 `{1:2, 3:field_id}`。已验证字段引用、`IF`、`ISBLANK`、`TODAY`、`COUNT`、`COUNTA`、`COUNTIF`（数值范围）、`DATEDIF`（按天）、`CONCATENATE`、`ROUND`、比较和算术；展示格式支持 `text/number/percent/currency/date/checkbox/email/progress`。写入后读取 `k36`，区分 computed/empty/pending/error，有限次数等待并返回样本结果、返回类型和错误；文本字段的 `COUNTIF`、`COALESCE` 和 `PERCENT` 会明确拒绝。
+`wecom_create_formula_field` / `wecom_update_formula_field` 把受限 AST 编码为网页公式 token：文本片段 `{1:1, 2:text}` 与字段引用 `{1:2, 3:field_id}`。直接创建/更新与计划工具共用校验：未登记函数、参数数量、类型、声明依赖冲突、自引用和依赖循环都在提交前拒绝，返回 `FORMULA_INVALID`、`FORMULA_TYPE_MISMATCH`、`FIELD_DEPENDENCY_CONFLICT` 或 `UNSUPPORTED_FORMULA`，不发出 HTTP 写入。已验证字段引用、`IF`、`ISBLANK`、`TODAY`、`COUNT`、`COUNTA`、`COUNTIF`（数值范围）、`DATEDIF`（按天）、`CONCATENATE`、`ROUND`、比较和算术；展示格式支持 `text/number/percent/currency/date/checkbox/email/progress`。写入后读取 `k36`，区分 computed/empty/pending/error，有限次数等待并返回样本结果、返回类型和错误；文本字段的 `COUNTIF`、`COALESCE` 和 `PERCENT` 会明确拒绝。
 
 ### 计划与核对
 
@@ -241,6 +241,10 @@ tool_timeout_sec = 1200
 - `unknown`：原始配置中出现未解释的设置键，或无法判定同名配置是否一致时使用，不能当作成功。
 
 成员单元格的 `not_returned` 不等同于空值；清空操作在只有 `not_returned` 时会报告待核对，而不是 verified。
+
+### 执行日志
+
+写入工具共用可选 `plan_id`（64 位十六进制计划 ID）。写入成功后 `execution_id`、时间、文档/子表、操作、版本、状态和 `plan_id` 会保存到本机 `executions/`，文件权限 `600`；`wecom_list_executions` 可按 `document_id` 和 `plan_id` 过滤。每个文档默认保留最近 1000 条，保存新日志后清理最旧条目；可用 `WECOM_MCP_EXECUTION_RETENTION` 调整上限。日志不含 Cookie、Token、签名链接或文件内容。
 
 ## 删除整份智能表格
 

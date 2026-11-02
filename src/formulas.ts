@@ -219,7 +219,32 @@ export interface FormulaDefinition {
   dependencies?: string[];
 }
 
-export function validateFormulaDefinition(definition: unknown, fields: NormalizedField[]): FormulaValidation & {
+function dependencyCyclePath(fields: NormalizedField[], targetId: string, dependencies: string[]): string[] | null {
+  const graph = new Map<string, string[]>(fields.map(field => [field.id, field.dependencies]));
+  graph.set(targetId, dependencies);
+  const state = new Map<string, 'visiting' | 'done'>();
+  const stack: string[] = [];
+  let cycle: string[] | null = null;
+  const visit = (id: string) => {
+    if (cycle) return;
+    if (state.get(id) === 'visiting') {
+      const start = stack.indexOf(id);
+      if (start >= 0) cycle = [...stack.slice(start), id];
+      return;
+    }
+    if (state.get(id) === 'done') return;
+    state.set(id, 'visiting');
+    stack.push(id);
+    for (const next of graph.get(id) || []) visit(next);
+    stack.pop();
+    state.set(id, 'done');
+  };
+  visit(targetId);
+  return cycle;
+}
+
+export function validateFormulaDefinition(definition: unknown, fields: NormalizedField[],
+  options: { field_id?: string } = {}): FormulaValidation & {
   result_type: string | null;
   format: string | null;
   config_status: 'valid' | 'invalid';
@@ -249,12 +274,33 @@ export function validateFormulaDefinition(definition: unknown, fields: Normalize
   if (definition.format !== undefined && typeof definition.format !== 'string') {
     errors.push({ code: 'FORMULA_INVALID', message: 'format 必须是文本。', path: '$.format' });
   }
+  if (options.field_id) {
+    const cycle = dependencyCyclePath(fields, options.field_id, validation.dependencies);
+    if (cycle) {
+      errors.push({ code: 'FIELD_DEPENDENCY_CONFLICT',
+        message: `公式依赖形成循环：${cycle.join(' -> ')}。`, path: '$.expression' });
+    }
+  }
   return { ...validation, status: errors.length ? 'invalid' : 'valid', errors,
     result_type: typeof definition.result_type === 'string' ? definition.result_type : null,
     format: typeof definition.format === 'string' ? definition.format : null,
     config_status: errors.length ? 'invalid' : 'valid',
     calculation_status: 'unavailable',
     calculation_note: '提供方公式计算状态与结果读取尚未验证；配置有效不等于计算已验证。' };
+}
+
+const PRIMARY_FORMULA_CODES = ['FIELD_DEPENDENCY_CONFLICT', 'FORMULA_TYPE_MISMATCH'] as const;
+
+// 直接写入路径与计划工具共用校验结果；错误码优先映射到依赖/类型冲突，其余统一为 FORMULA_INVALID。
+export function assertFormulaDefinition(definition: unknown, fields: NormalizedField[], options: { field_id?: string } = {}) {
+  const validation = validateFormulaDefinition(definition, fields, options);
+  if (validation.status === 'invalid') {
+    const codes = new Set(validation.errors.map(error => error.code));
+    const code = PRIMARY_FORMULA_CODES.find(candidate => codes.has(candidate)) ?? 'FORMULA_INVALID';
+    throw new WecomError(code, '公式未通过本地校验；未提交写入。', {
+      errors: validation.errors, inferred_type: validation.inferred_type, result_type: validation.result_type });
+  }
+  return validation;
 }
 
 // 受限解释器只执行结构化节点，供本地测试和业务规则核对；它不会执行用户提供的任意文本。
@@ -331,6 +377,22 @@ export function annualCounts(records: { source_subtask_number?: unknown; status?
 export interface ProviderFormulaToken { '1': 1 | 2; '2'?: string; '3'?: string }
 
 export const PROVIDER_FORMULA_CALLS = new Set(['if', 'is_empty', 'today', 'count', 'count_non_empty', 'count_equals', 'date_diff_days', 'concat', 'round']);
+
+export function unsupportedProviderCalls(expression: unknown): string[] {
+  const names = new Set<string>();
+  const visit = (node: any): void => {
+    if (!node || typeof node !== 'object') return;
+    if (node.kind === 'call' && typeof node.name === 'string') {
+      names.add(node.name);
+      for (const arg of Array.isArray(node.args) ? node.args : []) visit(arg);
+      return;
+    }
+    if (node.kind === 'binary') { visit(node.left); visit(node.right); return; }
+    if (node.kind === 'unary') visit(node.operand);
+  };
+  visit(expression);
+  return [...names].filter(name => !PROVIDER_FORMULA_CALLS.has(name));
+}
 
 const PROVIDER_CALLS: Record<string, string> = {
   if: 'IF', is_empty: 'ISBLANK', today: 'TODAY', count: 'COUNT', count_non_empty: 'COUNTA',

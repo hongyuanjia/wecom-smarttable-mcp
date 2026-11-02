@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dueStatus, completionRate, shanghaiDayKey, todayInShanghai, validateFormulaExpression,
-  validateFormulaDefinition, evaluateFormula, annualCounts, encodeProviderFormula } from '../dist/formulas.js';
+  validateFormulaDefinition, assertFormulaDefinition, unsupportedProviderCalls,
+  evaluateFormula, annualCounts, encodeProviderFormula } from '../dist/formulas.js';
 
 const fields = [
   { id: 'f_status', type: 'SINGLE_SELECT' },
@@ -99,6 +100,38 @@ test('年度事项数量与完成数量按来源子任务编号匹配，完成�
   assert.equal(annualCounts(records, '9-9').rate.status, 'empty');
 });
 
+
+test('公式定义校验拒绝自引用和更新后依赖循环，并返回具体错误码', () => {
+  const formulaFields = [
+    { id: 'f_a', type: 'FORMULA', dependencies: ['f_b'] },
+    { id: 'f_b', type: 'FORMULA', dependencies: ['f_a'] },
+    { id: 'f_num', type: 'NUMBER', dependencies: [] },
+    { id: 'f_name', type: 'TEXT', dependencies: [] },
+  ];
+  const cycle = validateFormulaDefinition({ expression: { kind: 'field', field_id: 'f_b' }, result_type: 'number' },
+    formulaFields, { field_id: 'f_a' });
+  assert.ok(cycle.errors.some(error => error.code === 'FIELD_DEPENDENCY_CONFLICT'));
+
+  const selfReference = validateFormulaDefinition({ expression: { kind: 'field', field_id: 'f_a' }, result_type: 'number' },
+    formulaFields, { field_id: 'f_a' });
+  assert.ok(selfReference.errors.some(error => error.code === 'FIELD_DEPENDENCY_CONFLICT'));
+
+  assert.throws(() => assertFormulaDefinition({ expression: { kind: 'binary', operator: 'add',
+    left: { kind: 'field', field_id: 'f_name' }, right: { kind: 'constant', value: 1 } }, result_type: 'number' }, formulaFields),
+  error => error.code === 'FORMULA_TYPE_MISMATCH');
+  assert.throws(() => assertFormulaDefinition({ expression: { kind: 'call', name: 'not_a_function', args: [] },
+    result_type: 'number' }, formulaFields), error => error.code === 'FORMULA_INVALID');
+  assert.throws(() => assertFormulaDefinition({ expression: { kind: 'field', field_id: 'f_b' },
+    result_type: 'number' }, formulaFields, { field_id: 'f_a' }), error => error.code === 'FIELD_DEPENDENCY_CONFLICT');
+});
+
+test('未验证的提供方函数仍在编码前拒绝，不因本地注册表而放宽', () => {
+  assert.deepEqual(unsupportedProviderCalls({ kind: 'call', name: 'coalesce', args: [
+    { kind: 'constant', value: 1 }, { kind: 'constant', value: 2 }] }), ['coalesce']);
+  assert.deepEqual(unsupportedProviderCalls({ kind: 'binary', operator: 'add',
+    left: { kind: 'call', name: 'round', args: [{ kind: 'constant', value: 1 }] },
+    right: { kind: 'constant', value: 2 } }), []);
+});
 
 test('网页公式编码：DATEDIF 补足按天单位，文本 COUNTIF 明确拒绝', () => {
   const tokens = encodeProviderFormula({ kind: 'call', name: 'date_diff_days', args: [

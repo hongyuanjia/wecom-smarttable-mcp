@@ -13,6 +13,7 @@ export interface MemberWriteInput {
   expectedRevision: number;
   notifyMembers: boolean;
   updates: MemberUpdateInput[];
+  planId?: string;
 }
 
 function targetKey(recordId: string, fieldId: string) {
@@ -122,7 +123,7 @@ export async function updateMemberCells(client: WecomClient, input: MemberWriteI
   const writer = new WecomWriter(client, signal);
   const written = await writer.updateMemberCells(input.url, input.sheetId, input.expectedRevision,
     changed.map(plan => ({ record_id: plan.record_id, field_id: plan.field_id,
-      uids: plan.final_members.map(member => member.id) })));
+      uids: plan.final_members.map(member => member.id) })), input.planId);
 
   return {
     status: written.status,

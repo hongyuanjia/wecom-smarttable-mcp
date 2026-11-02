@@ -29,6 +29,13 @@ test('真实 stdio MCP 公布三十三个工具，新写入口按能力矩阵拒
     const query = tools.find(t => t.name === 'wecom_query_records');
     assert.equal(query.annotations.readOnlyHint, true);
     assert.equal(query.inputSchema.additionalProperties, false);
+    const executions = tools.find(t => t.name === 'wecom_list_executions');
+    assert.equal('plan_id' in executions.inputSchema.properties, true);
+    for (const name of ['create_view', 'update_view', 'create_formula_field', 'update_formula_field', 'add_records']) {
+      const tool = tools.find(t => t.name === `wecom_${name}`);
+      assert.equal('plan_id' in tool.inputSchema.properties, true, name);
+      assert.equal(tool.inputSchema.additionalProperties, false, name);
+    }
     const identity = { document_id: 'id_example_document', sheet_id: 'id_example_sheet', record_id: 'id_example_record',
       field_id: 'id_example_field', asset_id: 'id_example_asset' };
     const url = 'https://doc.weixin.qq.com/smartsheet/id_example_document';
