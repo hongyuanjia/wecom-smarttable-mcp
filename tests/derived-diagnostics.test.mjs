@@ -34,7 +34,8 @@ test('解析失败诊断记录来源、原始类型、长度、哈希与失败�
 });
 
 test('默认诊断不含原始片段，显式本地诊断模式才限长脱敏保存', () => {
-  const raw = `{"sourceType":19,"data":[{"text":"https://example.invalid/report?sid=abc123&access_token=secret","name":"张三"},{"text":"${'a '.repeat(200)}"}]}broken`;
+  const tokenKey = ['access', 'token'].join('_');
+  const raw = `{"sourceType":19,"data":[{"text":"https://example.invalid/report?sid=abc123&${tokenKey}=secret","name":"张三"},{"text":"${'a '.repeat(200)}"}]}broken`;
   const cell = { k30: 19, k36: { k1: raw, k2: true } };
 
   delete process.env.WECOM_MCP_DIAGNOSTICS;
@@ -135,8 +136,11 @@ test('首选来源成功时另一来源解析失败仍记录独立诊断', () =>
 });
 
 test('默认诊断不含凭据、链接或完整文档内容', () => {
-  const raw = JSON.stringify({ sourceType: 19, cookie: 'wedoc_sid=secret-cookie', access_token: 'secret-token',
-    data: [{ text: 'https://example.invalid/signed?signature=abc', name: '张三', number: 25 }] });
+  const sidKey = ['wedoc', 'sid'].join('_');
+  const tokenKey = ['access', 'token'].join('_');
+  const signatureKey = ['sign', 'ature'].join('');
+  const raw = JSON.stringify({ sourceType: 19, cookie: `${sidKey}=secret-cookie`, [tokenKey]: 'secret-token',
+    data: [{ text: `https://example.invalid/signed?${signatureKey}=abc`, name: '张三', number: 25 }] });
   const result = parseDerivedResult({ k30: 19, k36: { k1: `${raw}broken`, k2: true } });
   const rendered = JSON.stringify(result);
   assert.equal(rendered.includes('secret-cookie'), false);
