@@ -1,6 +1,6 @@
 {
   "name": "wecom-smarttable-mcp",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "type": "module",
   "bin": {
     "wecom-smarttable-mcp": "dist/server.js",
