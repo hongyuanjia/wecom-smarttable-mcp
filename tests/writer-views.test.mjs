@@ -107,6 +107,14 @@ test('列宽真实变化只写请求且未请求列宽保持不变', async () =>
   assert.deepEqual(commands, [[{ t: 3024, v: 5, c: { '1': 't_view', '2': 'v_edit', '3': 'f_text', '4': { '1': 300 } }, r: -1, o: 0 }]]);
 });
 
+test('列宽补丁包含当前视图外字段时在写入前拒绝', async () => {
+  const { client, posts } = makeClient(rawView());
+  const writer = new WecomWriter(client, new AbortController().signal);
+  await assert.rejects(() => writer.updateView(url, 't_view', 7, 'v_edit', { widths: { f_task: 140 } }),
+    error => error.code === 'UNSUPPORTED_VIEW_CHANGE' && error.details.field_ids.includes('f_task'));
+  assert.equal(posts.length, 0, '视图外字段的列宽补丁不得触发任何写入');
+});
+
 test('k1 声明的隐藏列与回读一致时不写 3018，显式空数组才产生清除写入', async () => {
   const initial = rawView({ k1: ['f_text', 'f_status'] });
   const noop = makeClient(initial);

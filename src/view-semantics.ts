@@ -39,6 +39,21 @@ export function validateWidths(widths: Record<string, number>, fieldIds: readonl
   return widths;
 }
 
+// 视图列成员校验：hidden_fields 与 widths 只能指向当前有效视图列（含隐藏列）。
+// 全表存在但未加入视图的字段不是可显示/隐藏的列，也没有可调整的列宽。
+export function assertFieldsInViewColumns(fieldIds: readonly string[], columns: readonly string[],
+  message: string, options: { code?: string; view_id?: string } = {}): string[] {
+  const columnSet = new Set(columns);
+  const outside = fieldIds.filter(id => !columnSet.has(id));
+  if (outside.length) {
+    throw new WecomError(options.code ?? 'UNSUPPORTED_VIEW_CHANGE', message, {
+      ...(options.view_id !== undefined ? { view_id: options.view_id } : {}),
+      field_ids: outside,
+    });
+  }
+  return [...fieldIds];
+}
+
 // 隐藏列来源优先级：k1 显式声明 > k5.k2 宽度标志 > 未出现在当前视图列中。
 // 计划、执行回读和核验必须从同一入口读取，否则同一视图会得到不同隐藏集合。
 export interface HiddenFieldExtraction {
