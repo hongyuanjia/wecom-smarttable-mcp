@@ -11,7 +11,7 @@ import { acknowledgedClears, addColumnMutations, appendRank, columnViewsMatch, d
   type CellValue, type ColumnInput, type MemberChange, type Mutation, type RecordInput } from './mutations.js';
 import { cellsFor, parseDerivedResult } from './protocol.js';
 import { buildViewObject, compareCreateView, encodeViewFilter, encodeViewGroup, encodeViewSort, encodeViewStatistics, normalizeView, viewStatisticsMatches, VIEW_TYPE_CODES, type ViewWriteInput } from './views.js';
-import { extractHiddenFields, validateHiddenFields, compareHiddenFieldSets, compareProtectedWidths, compareRequestedWidths,
+import { assertFieldsInViewColumns, extractHiddenFields, validateHiddenFields, compareHiddenFieldSets, compareProtectedWidths, compareRequestedWidths,
   validateUpdateFieldOrder, validateWidths } from './view-semantics.js';
 import { normalizeFields } from './fields.js';
 import { formulaFieldMutations, formulaFormatter, formulaFormatterMatches, lookupFieldMutations, relationFieldMutations, type FormulaFormatSpec, type LookupSpec, type RelationSpec } from './field-writer.js';
@@ -563,6 +563,13 @@ export class WecomWriter {
     const normalizedFields = normalizeFields(target.schema, [target.sheetId]);
     const fieldsById = new Map(normalizedFields.map(field => [field.id, field]));
     const fieldIds = [...fieldsById.keys()];
+    if (patch.widths !== undefined) {
+      // 在组装任何写入步骤前完成宽度范围与列成员校验：视图外字段不得产生 3024。
+      validateWidths(patch.widths, fieldIds);
+      assertFieldsInViewColumns(Object.keys(patch.widths), rawColumnOrder(raw),
+        'widths 只能设置当前视图列内的字段；未加入视图的字段没有可调整的列宽。',
+        { view_id: viewId });
+    }
     const filterPatch = patch.filter;
     const properties = rawViewProperties(raw);
     const beforeWidths = rawWidths(raw);
@@ -618,13 +625,9 @@ export class WecomWriter {
     }
     if (patch.hidden_fields !== undefined) hiddenPatch = patch.hidden_fields;
     if (hiddenPatch !== undefined && raw.k32 !== 2) {
-      const columns = new Set(rawColumnOrder(raw));
-      const outside = hiddenPatch.filter(id => !columns.has(id));
-      if (outside.length) {
-        throw new WecomError('UNSUPPORTED_VIEW_CHANGE',
-          'hidden_fields 只能设置当前视图列内的字段；未加入视图的字段不能通过隐藏列显示或隐藏。',
-          { view_id: viewId, field_ids: outside });
-      }
+      assertFieldsInViewColumns(hiddenPatch, rawColumnOrder(raw),
+        'hidden_fields 只能设置当前视图列内的字段；未加入视图的字段不能通过隐藏列显示或隐藏。',
+        { view_id: viewId });
     }
     if (patch.kanban?.card_fields !== undefined) {
       const columns = rawColumnOrder(raw);
@@ -646,7 +649,6 @@ export class WecomWriter {
     }
     if (patch.widths !== undefined) {
       const widths = patch.widths;
-      validateWidths(widths, fieldIds);
       const commands: Mutation[] = [];
       for (const [id, width] of Object.entries(widths)) {
         // 已是当前原始宽度就不再提交 3024；全部相同则本次操作无写入、版本不前进。

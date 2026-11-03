@@ -453,6 +453,27 @@ test('列宽按补丁合并：只核验请求键，未请求键保留，空对�
   error => error.code === 'UNKNOWN_FIELD');
 });
 
+test('列宽补丁只接受当前视图列：视图外字段拒绝，视图内重复无差异，视图内变化生效', () => {
+  const existing = normalizeView(rawView(), fields);
+  assert.deepEqual(existing.columns, ['f_text', 'f_user', 'f_status']);
+  assert.deepEqual(existing.absent_fields, ['f_task']);
+
+  const repeated = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { widths: { f_text: 280 } }, views: [existing], fields });
+  assert.equal(repeated.decision, 'skip');
+  assert.deepEqual(repeated.differences, []);
+
+  const changed = planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { widths: { f_text: 300 } }, views: [existing], fields });
+  assert.equal(changed.decision, 'update');
+  assert.deepEqual(changed.differences, [{ path: 'widths.f_text', before: 280, after: 300 }]);
+
+  assert.throws(() => planViewWrite({ action: 'update', view_id: 'v_mine',
+    patch: { widths: { f_task: 140 } }, views: [existing], fields }),
+  error => error.code === 'UNSUPPORTED_VIEW_CHANGE'
+    && error.details.field_ids.includes('f_task'));
+});
+
 test('分组和排序仍按顺序比较，不套用隐藏列集合语义', () => {
   const existing = normalizeView(rawView({ k7: [{ k1: 'f_status', k2: false }, { k1: 'f_user', k2: true }],
     k9: [{ k1: 'f_text', k2: false }] }), fields);

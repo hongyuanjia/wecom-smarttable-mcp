@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { WecomError } from './errors.js';
-import { assertNoDuplicateFieldIds, extractHiddenFields, compareHiddenFieldSets, compareRequestedWidths,
+import { assertFieldsInViewColumns, assertNoDuplicateFieldIds, extractHiddenFields, compareHiddenFieldSets, compareRequestedWidths,
   compareWidthMaps, mergeWidths, validateCreateFieldSelection, validateHiddenFields, validateUpdateFieldOrder,
   validateWidths } from './view-semantics.js';
 import type { NormalizedField } from './fields.js';
@@ -448,17 +448,17 @@ export function planViewWrite(input: {
       : validateCreateFieldSelection(patch.field_order, input.fields.map(field => field.id));
   } else effective.columns = existing?.columns ?? input.fields.map(field => field.id);
   if (patch.hidden_fields !== undefined) {
-    const columns = new Set(effective.columns as string[]);
-    const outside = patch.hidden_fields.filter(id => !columns.has(id));
-    if (outside.length) {
-      throw new WecomError('UNSUPPORTED_VIEW_CHANGE',
-        'hidden_fields 只能设置当前视图列内的字段；未加入视图的字段不能通过隐藏列显示或隐藏。',
-        { view_id: existing?.id, field_ids: outside });
-    }
+    assertFieldsInViewColumns(patch.hidden_fields, effective.columns as string[],
+      'hidden_fields 只能设置当前视图列内的字段；未加入视图的字段不能通过隐藏列显示或隐藏。',
+      { view_id: existing?.id });
     effective.hidden_fields = patch.hidden_fields;
   } else effective.hidden_fields = existing?.hidden_fields ?? [];
   if (patch.widths !== undefined) {
     // 局部补丁：未提交的列宽保持现状，避免把整段宽度字典当作替换目标。
+    // 宽度键同样必须属于有效视图列；全表字段没有可调整的列宽。
+    assertFieldsInViewColumns(Object.keys(patch.widths), effective.columns as string[],
+      'widths 只能设置当前视图列内的字段；未加入视图的字段没有可调整的列宽。',
+      { view_id: existing?.id });
     effective.widths = mergeWidths(existing?.widths ?? {}, patch.widths);
   } else effective.widths = existing?.widths ?? {};
   if (patch.frozen_field_count !== undefined) {
@@ -590,12 +590,9 @@ export function buildViewObject(input: {
   // 新建视图使用独立的字段选择契约：允许选择全表字段的子集，但不允许重复或混入其他表字段。
   const requested = validateCreateFieldSelection(input.patch.field_order || fieldIds, fieldIds);
   if (input.type !== 'kanban') {
-    const outside = [...hidden].filter(id => !requested.includes(id));
-    if (outside.length) {
-      throw new WecomError('INVALID_ARGUMENT',
-        '新建视图的 hidden_fields 只能包含在本次选择的列中；未选择的字段不是隐藏列。',
-        { field_ids: outside });
-    }
+    assertFieldsInViewColumns([...hidden], requested,
+      '新建视图的 hidden_fields 只能包含在本次选择的列中；未选择的字段不是隐藏列。',
+      { code: 'INVALID_ARGUMENT' });
   }
   const columns = (input.type === 'kanban' && input.patch.kanban
     ? input.patch.kanban.card_fields
