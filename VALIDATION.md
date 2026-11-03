@@ -193,11 +193,11 @@ URL 校验采用精确域名匹配：第一方鉴权下载仅允许已验证的�
 
 ## 0.9.0 读取与核验兼容修复集成（2026-11-02）
 
-对应《智能表格 MCP 读取与核验兼容问题修复说明-20261102》R1/R2/R4/R5 与 D1。集成分支 `spec/compat-read-verify-20261102`，提交 `1623542f4ebde1a0b029e1a45a5a8fc4f0090351`，包版本仍为 `0.9.0`。本轮只改读取、计划、回读和核验语义，业务文档未写入。
+对应《智能表格 MCP 读取与核验兼容问题修复说明-20261102》R1/R2/R4/R5 与 D1。集成分支 `spec/compat-read-verify-20261102`，提交 `87d6545c5a02b10188bd7c7846026f4b27770ff0`，包版本仍为 `0.9.0`。本轮只改读取、计划、回读和核验语义，业务文档未写入。
 
 - **R1 `field_order`**：更新已有视图时表示“当前视图全部列（含隐藏列）的排列”，不得用全表字段补齐、增删列或混入其他表字段；新建视图的字段选择使用独立契约。计划、执行回读与核验共用同一校验。离线覆盖 29 字段表/16 列视图、29 列替换、重复/未知/遗漏/混入其他表字段及重复正确排列零写入。
-- **R4 隐藏列**：`hidden_fields` 按集合比较，乱序不再报差异；缺少/多出字段返回具体路径；省略保持原值，显式 `[]` 清空。`field_order`、分组和排序仍按顺序比较。
-- **R5 列宽**：计划阶段把 `widths` 补丁合并进现有宽度，核验只检查本次请求的键；实际值 299 对目标 300 会指出 `widths.A`；重复补丁无差异、无写入。未请求键仍用于核查无关配置未受损。
+- **R4 隐藏列**：`hidden_fields` 只表示当前视图列内的显式隐藏，按集合比较，乱序不再报差异；缺少/多出字段返回具体路径；省略保持原值，显式 `[]` 清空当前列内的隐藏。未加入视图的字段单独返回 `absent_fields`，不能通过 `hidden_fields` 显示/隐藏。`field_order`、分组和排序仍按顺序比较。
+- **R5 列宽**：计划阶段把 `widths` 补丁合并进现有宽度，核验只检查本次请求的键；实际值 299 对目标 300 会指出 `widths.A`；重复补丁无差异、无写入。未请求键仍用于核查无关配置未受损；列宽补丁字段必须属于当前视图列，视图外字段在写入前拒绝。
 - **R2 派生字段**：`k36.k1` 与 `k3601` 解码后进入同一标准化入口，整表读取与条件查询返回相同的 `value` / `result_type`；保留 0、`false`、空串、空数组、空值、未返回、待计算、解析失败和计算错误的区分，百分数数值与显示文本分开，LOOKUP 多值/人员/选项/日期/货币/错误一致映射，未知格式码标记 `UNKNOWN_<code>`。
 - **R3**：`invalid_json` 诊断能力已补充（见上一节），真实历史失败输入仍未捕获，历史原因待复现；该项目保持未关闭。
 - **构建指纹**：`wecom_capabilities.build` 返回 `build_commit`、`build_id`、`output_schema_version`、`derived_parser_version`、关键模块 SHA-256 与 `running.entry_sha256`/`matches_build`。同一份源码重建的 `build_id` 可复现，`build_commit` 可用 `WECOM_BUILD_COMMIT` 覆盖。
@@ -210,7 +210,7 @@ URL 校验采用精确域名匹配：第一方鉴权下载仅允许已验证的�
 
 ### 安装与构建标识
 
-- 构建：`npm run build` → `build_id=sha256:18392c7ab29beb063b7ed5c10b69e6b4b7c409b4c432d3458aeff0e2dc3f3653`，输出结构版本 `4`，派生解析器版本 `3`。
+- 构建：`npm run build` → `build_id=sha256:d995bb93166ba3892d7d74424ef1cba2e3d21b0c7205b317241770c5c365e5b9`，输出结构版本 `4`，派生解析器版本 `3`。
 - 打包：`npm pack` 生成 36 个文件的 `wecom-smarttable-mcp-0.9.0.tgz`。
 - 安装：`npm install --prefix ~/.local/share/wecom-smarttable-mcp/runtime --no-save ./wecom-smarttable-mcp-0.9.0.tgz --omit=dev`，安装包版本 `0.9.0`。
 - 入口：`<runtime>/node_modules/wecom-smarttable-mcp/dist/server.js`（默认 runtime 为 `~/.local/share/wecom-smarttable-mcp/runtime`），SHA-256 `16772c369b06f7f1e56a344f946ecaec122e4290d07b3a0158401332a65cc094`。
